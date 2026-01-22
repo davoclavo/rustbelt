@@ -737,6 +737,7 @@ impl RustAnalyzerish {
             prefer_no_std: false,
             prefer_prelude: true,
             prefer_absolute: false,
+            show_conflicts: true,
         };
         let rename_result = match analysis.rename(position, new_name, &rename_config) {
             Ok(result) => result,
@@ -827,6 +828,7 @@ impl RustAnalyzerish {
             sized_bound: false,
             discriminant_hints: DiscriminantHints::Never,
             parameter_hints: true,
+            parameter_hints_for_missing_arguments: false,
             generic_parameter_hints: GenericParameterHints {
                 type_hints: false,
                 lifetime_hints: false,
@@ -846,6 +848,8 @@ impl RustAnalyzerish {
             hide_named_constructor_hints: false,
             hide_closure_initialization_hints: false,
             hide_closure_parameter_hints: false,
+            hide_inferred_type_hints: false,
+            implied_dyn_trait_hints: false,
             range_exclusive_hints: false,
             closure_style: ClosureStyle::ImplFn,
             max_length: None,
@@ -973,6 +977,7 @@ impl RustAnalyzerish {
             code_action_grouping: false,
             expr_fill_default: ra_ap_ide_db::assists::ExprFillDefaultMode::Todo,
             prefer_self_ty: false,
+            show_rename_conflicts: true,
         };
 
         // Get available assists
@@ -1062,6 +1067,7 @@ impl RustAnalyzerish {
             code_action_grouping: false,
             expr_fill_default: ra_ap_ide_db::assists::ExprFillDefaultMode::Todo,
             prefer_self_ty: false,
+            show_rename_conflicts: true,
         };
 
         // Get available assists with resolved source changes

@@ -78,6 +78,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Related Projects
 
-- Powered by [tenx-mcp](https://github.com/tenxhq/tenx-mcp)
+- Powered by [tmcp](https://github.com/cortesi/tmcp)
 - Relies on [ruskel](https://github.com/cortesi/ruskel) for generating Rust crate skeletons
 - Built on top of [rust-analyzer](https://github.com/rust-lang/rust-analyzer) internal crates

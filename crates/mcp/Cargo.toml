@@ -12,7 +12,7 @@ librustbelt = { path = "../librustbelt", features = ["schemars"] }
 
 # MCP support
 
-tenx-mcp = { git = "https://github.com/tenxhq/tenx-mcp.git", rev = "d671470"}
+tmcp = "0.2"
 
 # Rust code skeleton generation
 libruskel = { git = "https://github.com/cortesi/ruskel.git", rev = "57ad247"}

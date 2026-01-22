@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/0.16.0/.schema/devbox.schema.json",
+  "packages": {
+    "rustup": "latest",
+    "libiconv": "latest",
+    "apple-sdk_15": "",
+    "openssl": {
+      "version": "latest",
+      "outputs": [
+        "out",
+        "dev"
+      ]
+    },
+    "curl": {
+      "version": "latest",
+      "outputs": [
+        "out",
+        "dev"
+      ]
+    },
+    "pkg-config": "latest"
+  },
+  "shell": {
+    "init_hook": [
+      "echo 'Welcome to devbox!' > /dev/null",
+      "unset DEVELOPER_DIR"
+    ],
+    "env": {
+      "OPENSSL_NO_VENDOR": "1"
+    },
+    "scripts": {
+      "test": [
+        "echo \"Error: no test specified\" && exit 1"
+      ]
+    }
+  }
+}

@@ -1,13 +1,13 @@
 //! Integration tests for the MCP server
 //!
-//! These tests verify the MCP server protocol implementation using the tenx-mcp
+//! These tests verify the MCP server protocol implementation using the tmcp
 //! client.
 
 use std::collections::HashMap;
 use std::{process::Command, time::Duration};
 
 use serde_json::Value;
-use tenx_mcp::{
+use tmcp::{
     Client, Result, ServerAPI,
     schema::{ClientCapabilities, Implementation, InitializeResult},
 };
