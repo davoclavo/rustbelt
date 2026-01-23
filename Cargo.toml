@@ -52,7 +52,7 @@ tracing-subscriber = "0.3"
 schemars = "1.2"
 
 # Build dependencies
-vergen-gix = { version = "1.0.9", features = ["build"] }
+vergen-gix = { version = "9.1", features = ["build"] }
 
 [profile.dev]
 # Make dev behave like release
