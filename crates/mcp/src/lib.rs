@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use libruskel::Ruskel;
 use librustbelt::{RustAnalyzerish, builder::RustAnalyzerishBuilder, entities::CursorCoordinates};
+use schemars;
 use serde::Deserialize;
-use tmcp::{Result, ServerCtx, mcp_server, schema::CallToolResult, schemars, tool};
+use tmcp::{Result, ServerCtx, ToolResult, mcp_server, schema::CallToolResult, tool};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -118,7 +119,10 @@ impl Rustbelt {
     }
 
     /// Initialize the analyzer if it hasn't been created yet
-    async fn ensure_analyzer<P: AsRef<Path>>(&self, file_path: P) -> Result<()> {
+    async fn ensure_analyzer<P: AsRef<Path>>(
+        &self,
+        file_path: P,
+    ) -> std::result::Result<(), tmcp::ToolError> {
         let mut analyzer_guard = self.analyzer.lock().await;
         if analyzer_guard.is_none() {
             // Create a default analyzer for the current folder
@@ -161,7 +165,7 @@ impl Rustbelt {
     ///   your token budget.
     /// - Pass `all_features=true` or `features=[…]` when a symbol is behind a feature gate.
     #[tool]
-    async fn ruskel(&self, _ctx: &ServerCtx, params: RuskelParams) -> Result<CallToolResult> {
+    async fn ruskel(&self, _ctx: &ServerCtx, params: RuskelParams) -> ToolResult {
         let ruskel = Ruskel::new();
 
         match ruskel.render(
@@ -171,8 +175,10 @@ impl Rustbelt {
             params.features.to_vec(),
             params.private,
         ) {
-            Ok(skeleton) => Ok(CallToolResult::new().with_text_content(skeleton).is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error generating skeleton: {e}")).is_error(true)),
+            Ok(skeleton) => Ok(CallToolResult::new().with_text_content(skeleton)),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error generating skeleton: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -184,11 +190,7 @@ impl Rustbelt {
     ///
     /// Returns human-readable type information or indicates if no type data is available.
     #[tool]
-    async fn get_type_hint(
-        &self,
-        _ctx: &ServerCtx,
-        params: CursorParams,
-    ) -> Result<CallToolResult> {
+    async fn get_type_hint(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -205,9 +207,14 @@ impl Rustbelt {
             .get_type_hint(&cursor)
             .await
         {
-            Ok(Some(type_info)) => Ok(CallToolResult::new().with_text_content(type_info.to_string()).is_error(false)),
-            Ok(None) => Ok(CallToolResult::new().with_text_content("No type information available at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error getting type hint: {e}")).is_error(true)),
+            Ok(Some(type_info)) => {
+                Ok(CallToolResult::new().with_text_content(type_info.to_string()))
+            }
+            Ok(None) => Ok(CallToolResult::new()
+                .with_text_content("No type information available at this position")),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting type hint: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -219,11 +226,7 @@ impl Rustbelt {
     /// Returns definition locations as "file_path:line_number:column_number" format,
     /// or indicates if no definitions are found.
     #[tool]
-    async fn get_definition(
-        &self,
-        _ctx: &ServerCtx,
-        params: CursorParams,
-    ) -> Result<CallToolResult> {
+    async fn get_definition(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -247,10 +250,14 @@ impl Rustbelt {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                Ok(CallToolResult::new().with_text_content(result_text).is_error(false))
+                Ok(CallToolResult::new().with_text_content(result_text))
             }
-            Ok(None) => Ok(CallToolResult::new().with_text_content("No definitions found at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error getting definitions: {e}")).is_error(true)),
+            Ok(None) => Ok(
+                CallToolResult::new().with_text_content("No definitions found at this position")
+            ),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting definitions: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -261,11 +268,7 @@ impl Rustbelt {
     ///
     /// Returns a list of completion suggestions with types and descriptions.
     #[tool]
-    async fn get_completions(
-        &self,
-        _ctx: &ServerCtx,
-        params: CursorParams,
-    ) -> Result<CallToolResult> {
+    async fn get_completions(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -289,10 +292,14 @@ impl Rustbelt {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                Ok(CallToolResult::new().with_text_content(result_text).is_error(false))
+                Ok(CallToolResult::new().with_text_content(result_text))
             }
-            Ok(None) => Ok(CallToolResult::new().with_text_content("No completions found at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error getting completions: {e}")).is_error(true)),
+            Ok(None) => Ok(
+                CallToolResult::new().with_text_content("No completions found at this position")
+            ),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting completions: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -305,11 +312,7 @@ impl Rustbelt {
     /// Returns a summary of all changes made with file paths and line numbers, or
     /// explains why the rename is not possible.
     #[tool]
-    async fn rename_symbol(
-        &self,
-        _ctx: &ServerCtx,
-        params: RenameParams,
-    ) -> Result<CallToolResult> {
+    async fn rename_symbol(&self, _ctx: &ServerCtx, params: RenameParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -326,9 +329,14 @@ impl Rustbelt {
             .rename_symbol(&cursor, &params.new_name)
             .await
         {
-            Ok(Some(rename_result)) => Ok(CallToolResult::new().with_text_content(rename_result.to_string()).is_error(false)),
-            Ok(None) => Ok(CallToolResult::new().with_text_content("Symbol cannot be renamed at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error performing rename: {e}")).is_error(true)),
+            Ok(Some(rename_result)) => {
+                Ok(CallToolResult::new().with_text_content(rename_result.to_string()))
+            }
+            Ok(None) => Ok(CallToolResult::new()
+                .with_text_content("Symbol cannot be renamed at this position")),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error performing rename: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -344,11 +352,7 @@ impl Rustbelt {
     ///
     /// Returns the source file content (full file or specified range) with inlay hints embedded as inline annotations.
     #[tool]
-    async fn view_inlay_hints(
-        &self,
-        _ctx: &ServerCtx,
-        params: ViewInlayHintsParams,
-    ) -> Result<CallToolResult> {
+    async fn view_inlay_hints(&self, _ctx: &ServerCtx, params: ViewInlayHintsParams) -> ToolResult {
         self.ensure_analyzer(&params.file_path).await?;
         match self
             .analyzer
@@ -359,8 +363,10 @@ impl Rustbelt {
             .view_inlay_hints(&params.file_path, params.start_line, params.end_line)
             .await
         {
-            Ok(annotated_content) => Ok(CallToolResult::new().with_text_content(annotated_content).is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error viewing inlay hints: {e}")).is_error(true)),
+            Ok(annotated_content) => Ok(CallToolResult::new().with_text_content(annotated_content)),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error viewing inlay hints: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -373,11 +379,7 @@ impl Rustbelt {
     /// Returns a list of reference locations with file paths, line numbers, and
     /// contextual information, or indicates if no references are found.
     #[tool]
-    async fn find_references(
-        &self,
-        _ctx: &ServerCtx,
-        params: CursorParams,
-    ) -> Result<CallToolResult> {
+    async fn find_references(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -401,10 +403,14 @@ impl Rustbelt {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                Ok(CallToolResult::new().with_text_content(result_text).is_error(false))
+                Ok(CallToolResult::new().with_text_content(result_text))
             }
-            Ok(None) => Ok(CallToolResult::new().with_text_content("No references found at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error finding references: {e}")).is_error(true)),
+            Ok(None) => {
+                Ok(CallToolResult::new().with_text_content("No references found at this position"))
+            }
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error finding references: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -416,11 +422,7 @@ impl Rustbelt {
     ///
     /// Returns a list of available assists with their IDs, descriptions, and target ranges.
     #[tool]
-    async fn get_assists(
-        &self,
-        _ctx: &ServerCtx,
-        params: CursorParams,
-    ) -> Result<CallToolResult> {
+    async fn get_assists(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -444,10 +446,14 @@ impl Rustbelt {
                     .collect::<Vec<_>>()
                     .join("\n");
 
-                Ok(CallToolResult::new().with_text_content(result_text).is_error(false))
+                Ok(CallToolResult::new().with_text_content(result_text))
             }
-            Ok(None) => Ok(CallToolResult::new().with_text_content("No assists available at this position").is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error getting assists: {e}")).is_error(true)),
+            Ok(None) => Ok(
+                CallToolResult::new().with_text_content("No assists available at this position")
+            ),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting assists: {e}"))
+                .mark_as_error()),
         }
     }
 
@@ -460,11 +466,7 @@ impl Rustbelt {
     /// Common assists include "merge_imports", "extract_function", "add_missing_impl", etc.
     /// Returns a summary of the changes made to files.
     #[tool]
-    async fn apply_assist(
-        &self,
-        _ctx: &ServerCtx,
-        params: ApplyAssistParams,
-    ) -> Result<CallToolResult> {
+    async fn apply_assist(&self, _ctx: &ServerCtx, params: ApplyAssistParams) -> ToolResult {
         let cursor = CursorCoordinates {
             file_path: params.file_path,
             line: params.line,
@@ -481,28 +483,27 @@ impl Rustbelt {
             .apply_assist(&cursor, &params.assist_id)
             .await
         {
-            Ok(Some(source_change)) => Ok(CallToolResult::new().with_text_content(source_change.to_string()).is_error(false)),
+            Ok(Some(source_change)) => {
+                Ok(CallToolResult::new().with_text_content(source_change.to_string()))
+            }
             Ok(None) => Ok(CallToolResult::new().with_text_content(format!(
                 "Assist '{}' not available at this position",
                 params.assist_id
-            )).is_error(false)),
-            Err(e) => Ok(CallToolResult::new().with_text_content(format!("Error applying assist: {e}")).is_error(true)),
+            ))),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error applying assist: {e}"))
+                .mark_as_error()),
         }
     }
 }
 
 pub async fn serve_stdio() -> Result<()> {
-    tmcp::Server::default()
-        .with_connection(Rustbelt::new)
-        .serve_stdio()
-        .await
+    tmcp::Server::new(Rustbelt::new).serve_stdio().await
 }
 
 pub async fn serve_tcp(addr: String) -> Result<()> {
     info!("Starting Rustbelt MCP server on {}", addr);
 
-    tmcp::Server::default()
-        .with_connection(Rustbelt::new)
-        .serve_tcp(addr)
-        .await
+    tmcp::Server::new(Rustbelt::new).serve_tcp(addr).await?;
+    Ok(())
 }

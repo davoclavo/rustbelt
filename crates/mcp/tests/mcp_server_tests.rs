@@ -7,17 +7,14 @@ use std::collections::HashMap;
 use std::{process::Command, time::Duration};
 
 use serde_json::Value;
-use tmcp::{
-    Client, Result, ServerAPI,
-    schema::{ClientCapabilities, Implementation, InitializeResult},
-};
+use tmcp::{Client, Result, SpawnedServer};
 use tokio::{
     process::Command as TokioCommand,
     time::{sleep, timeout},
 };
 
 /// Helper to create a test MCP client connected to the rustbelt server process
-async fn create_test_client() -> Result<(Client<()>, tokio::process::Child)> {
+async fn create_test_client() -> Result<(Client<()>, SpawnedServer)> {
     // Get the workspace root - this is the current project directory
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = std::path::Path::new(manifest_dir)
@@ -51,59 +48,35 @@ async fn create_test_client() -> Result<(Client<()>, tokio::process::Child)> {
     let binary_path = target_dir.join(profile).join("rustbelt");
 
     // Create client and connect to process
-    let mut client = Client::new("test-client".to_string(), "1.0.0".to_string());
+    let mut client = Client::new("test-client", "1.0.0");
 
     let mut cmd = TokioCommand::new(binary_path);
     cmd.arg("serve");
 
-    let child = client.connect_process(cmd).await?;
+    let spawned = client.connect_process(cmd).await?;
 
-    Ok((client, child))
-}
-
-/// Initialize the client connection
-async fn initialize_client(client: &mut Client<()>) -> Result<InitializeResult> {
-    let client_info = Implementation {
-        name: "test-client".to_string(),
-        version: "1.0.0".to_string(),
-        title: None,
-    };
-
-    let capabilities = ClientCapabilities::default();
-
-    client
-        .initialize("2025-06-18".to_string(), capabilities, client_info)
-        .await
+    Ok((client, spawned))
 }
 
 #[tokio::test]
 async fn test_mcp_server_initialize() {
-    let (mut client, mut child) = create_test_client()
+    let (mut _client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
 
-    let result = timeout(Duration::from_secs(10), initialize_client(&mut client))
-        .await
-        .expect("Timeout during initialization")
-        .expect("Failed to initialize");
-
-    // Verify response structure
-    assert_eq!(result.protocol_version, "2025-06-18");
-    assert_eq!(result.server_info.name, "rustbelt");
+    // connect_process already initializes
+    assert_eq!(spawned.server_info.protocol_version, "2025-11-25");
+    assert_eq!(spawned.server_info.server_info.name, "rustbelt");
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_list_tools() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     let result = timeout(Duration::from_secs(10), client.list_tools(None))
         .await
@@ -124,18 +97,14 @@ async fn test_mcp_server_list_tools() {
     assert!(tool_names.contains(&"apply_assist"));
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_call_tool() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     // Call tool with a crate that should exist
     let arguments = HashMap::from([
@@ -145,7 +114,7 @@ async fn test_mcp_server_call_tool() {
 
     let result = timeout(
         Duration::from_secs(30),
-        client.call_tool("ruskel", Some(arguments.into())),
+        client.call_tool("ruskel", arguments),
     )
     .await
     .expect("Timeout during tool call")
@@ -155,66 +124,52 @@ async fn test_mcp_server_call_tool() {
     assert!(!result.content.is_empty());
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_invalid_tool() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
 
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
-
     let arguments: HashMap<String, Value> = HashMap::new();
     // Call non-existent tool
-    let result = client
-        .call_tool("non_existent_tool", Some(arguments.into()))
-        .await;
+    let result = client.call_tool("non_existent_tool", arguments).await;
     println!("{:?}", result);
 
     // Should get an error
     assert!(result.is_err());
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_invalid_arguments() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     // Call tool without required target parameter
     let arguments = HashMap::from([
         ("private".to_string(), Value::from(true)), // Missing required "target" field
     ]);
 
-    let result = client.call_tool("ruskel", Some(arguments.into())).await;
+    let result = client.call_tool("ruskel", arguments).await;
 
     // Should get an error due to invalid parameters
     assert!(result.is_err());
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_multiple_requests() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     // Test multiple sequential requests
     let test_targets = ["serde", "tokio", "async-trait"];
@@ -234,7 +189,7 @@ async fn test_mcp_server_multiple_requests() {
 
         let result = timeout(
             Duration::from_secs(30),
-            client.call_tool("ruskel", Some(arguments.into())),
+            client.call_tool("ruskel", arguments),
         )
         .await
         .unwrap_or_else(|_| panic!("Timeout for target {target}"));
@@ -248,18 +203,14 @@ async fn test_mcp_server_multiple_requests() {
     }
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_server_error_recovery() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     // 1. Valid request
     let result = timeout(Duration::from_secs(10), client.list_tools(None))
@@ -270,9 +221,7 @@ async fn test_mcp_server_error_recovery() {
 
     let arguments: HashMap<String, Value> = HashMap::new();
     // 2. Invalid tool name (should error)
-    let result = client
-        .call_tool("non_existent_tool", Some(arguments.into()))
-        .await;
+    let result = client.call_tool("non_existent_tool", arguments).await;
     assert!(result.is_err());
 
     // 3. Valid request after error (server should recover)
@@ -287,9 +236,7 @@ async fn test_mcp_server_error_recovery() {
         ("private".to_string(), Value::from(true)), // Missing required "target" field
     ]);
 
-    let result = client
-        .call_tool("ruskel", Some(invalid_arguments.into()))
-        .await;
+    let result = client.call_tool("ruskel", invalid_arguments).await;
     // Should get an error due to invalid parameters
     assert!(result.is_err());
 
@@ -301,7 +248,7 @@ async fn test_mcp_server_error_recovery() {
 
     let result = timeout(
         Duration::from_secs(30),
-        client.call_tool("ruskel", Some(final_arguments.into())),
+        client.call_tool("ruskel", final_arguments),
     )
     .await
     .expect("Timeout during final request");
@@ -311,18 +258,14 @@ async fn test_mcp_server_error_recovery() {
     }
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }
 
 #[tokio::test]
 async fn test_mcp_get_completions_tool() {
-    let (mut client, mut child) = create_test_client()
+    let (mut client, mut spawned) = create_test_client()
         .await
         .expect("Failed to create test client");
-
-    let _init_result = initialize_client(&mut client)
-        .await
-        .expect("Failed to initialize");
 
     // Get the path to our sample project main.rs file
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -345,7 +288,7 @@ async fn test_mcp_get_completions_tool() {
 
     let result = timeout(
         Duration::from_secs(30),
-        client.call_tool("get_completions", Some(arguments.into())),
+        client.call_tool("get_completions", arguments),
     )
     .await
     .expect("Timeout during get_completions call")
@@ -361,5 +304,5 @@ async fn test_mcp_get_completions_tool() {
     println!("Completions result: {:?}", result.content);
 
     // Clean up
-    let _ = child.kill().await;
+    let _ = spawned.process.kill().await;
 }

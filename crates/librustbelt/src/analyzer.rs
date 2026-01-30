@@ -16,8 +16,8 @@ use ra_ap_ide::{
     InlayFieldsToResolve, InlayHintPosition, InlayHintsConfig, LifetimeElisionHints, LineCol,
     LineIndex, MonikerResult, RenameConfig, SubstTyLen, TextRange, TextSize,
 };
-use ra_ap_ide_db::MiniCore;
 use ra_ap_ide_assists::{AssistConfig, AssistResolveStrategy, assists};
+use ra_ap_ide_db::MiniCore;
 use ra_ap_ide_db::imports::insert_use::{ImportGranularity, InsertUseConfig, PrefixKind};
 use ra_ap_ide_db::text_edit::TextEditBuilder;
 use tracing::{debug, trace, warn};
@@ -416,7 +416,9 @@ impl RustAnalyzerish {
         // Use std::panic::catch_unwind to handle potential panics in rust-analyzer
         // Happens when we query colum: 1 row: 1
         // TODO Report bug
-        let goto_config = GotoDefinitionConfig { minicore: MiniCore::default() };
+        let goto_config = GotoDefinitionConfig {
+            minicore: MiniCore::default(),
+        };
         let goto_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             analysis.goto_definition(Self::create_file_position(file_id, offset), &goto_config)
         }));
@@ -593,18 +595,20 @@ impl RustAnalyzerish {
             search_scope: None,
             minicore: MiniCore::default(),
         };
-        let references_result =
-            match analysis.find_all_refs(Self::create_file_position(file_id, offset), &find_refs_config) {
-                Ok(Some(search_results)) => search_results,
-                Ok(None) => {
-                    debug!("No references found at position");
-                    return Ok(None);
-                }
-                Err(e) => {
-                    debug!("Error finding references: {}", e);
-                    return Err(anyhow::anyhow!("Failed to find references: {}", e));
-                }
-            };
+        let references_result = match analysis.find_all_refs(
+            Self::create_file_position(file_id, offset),
+            &find_refs_config,
+        ) {
+            Ok(Some(search_results)) => search_results,
+            Ok(None) => {
+                debug!("No references found at position");
+                return Ok(None);
+            }
+            Err(e) => {
+                debug!("Error finding references: {}", e);
+                return Err(anyhow::anyhow!("Failed to find references: {}", e));
+            }
+        };
 
         let mut references = Vec::new();
 

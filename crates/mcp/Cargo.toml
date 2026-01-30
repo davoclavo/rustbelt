@@ -12,7 +12,8 @@ librustbelt = { path = "../librustbelt", features = ["schemars"] }
 
 # MCP support
 
-tmcp = "0.2"
+tmcp = "0.3"
+schemars = { workspace = true }
 
 # Rust code skeleton generation
 libruskel = { git = "https://github.com/cortesi/ruskel.git", rev = "57ad247"}
