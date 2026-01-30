@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use libruskel::Ruskel;
 use librustbelt::{RustAnalyzerish, builder::RustAnalyzerishBuilder, entities::CursorCoordinates};
-use schemars;
 use serde::Deserialize;
 use tmcp::{Result, ServerCtx, ToolResult, mcp_server, schema::CallToolResult, tool};
 use tokio::sync::Mutex;

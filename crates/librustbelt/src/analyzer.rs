@@ -178,13 +178,13 @@ impl RustAnalyzerish {
         let offset = self.validate_and_convert_cursor(&resolved_cursor, &line_index)?;
 
         // Debug cursor position (show both original and resolved if different)
-        if raw_cursor.symbol.is_some()
+        if let Some(symbol) = raw_cursor.symbol.as_ref()
             && (raw_cursor.line != resolved_cursor.line
                 || raw_cursor.column != resolved_cursor.column)
         {
             trace!(
                 "Symbol '{}' resolved from {}:{} to {}:{}",
-                raw_cursor.symbol.as_ref().unwrap(),
+                symbol,
                 raw_cursor.line,
                 raw_cursor.column,
                 resolved_cursor.line,
@@ -614,70 +614,66 @@ impl RustAnalyzerish {
 
         for search_result in references_result {
             // Add the declaration (definition) if it exists
-            if let Some(declaration) = &search_result.declaration {
-                if let Ok(decl_line_index) = analysis.file_line_index(declaration.nav.file_id) {
-                    let decl_range = declaration.nav.focus_or_full_range();
-                    let start_line_col = decl_line_index.line_col(decl_range.start());
-                    let end_line_col = decl_line_index.line_col(decl_range.end());
+            if let Some(declaration) = &search_result.declaration
+                && let Ok(decl_line_index) = analysis.file_line_index(declaration.nav.file_id)
+            {
+                let decl_range = declaration.nav.focus_or_full_range();
+                let start_line_col = decl_line_index.line_col(decl_range.start());
+                let end_line_col = decl_line_index.line_col(decl_range.end());
 
-                    if let Some(decl_file_path) =
-                        self.file_watcher.file_path(declaration.nav.file_id)
+                if let Some(decl_file_path) = self.file_watcher.file_path(declaration.nav.file_id) {
+                    // Get the line content containing the declaration
+                    let content = if let Ok(file_text) = analysis.file_text(declaration.nav.file_id)
                     {
-                        // Get the line content containing the declaration
-                        let content =
-                            if let Ok(file_text) = analysis.file_text(declaration.nav.file_id) {
-                                Self::get_line_content(&file_text, start_line_col.line as usize)
-                            } else {
-                                "".to_string()
-                            };
+                        Self::get_line_content(&file_text, start_line_col.line as usize)
+                    } else {
+                        "".to_string()
+                    };
 
-                        references.push(ReferenceInfo {
-                            file_path: decl_file_path,
-                            line: start_line_col.line + 1,
-                            column: start_line_col.col + 1,
-                            end_line: end_line_col.line + 1,
-                            end_column: end_line_col.col + 1,
-                            name: declaration.nav.name.to_string(),
-                            content,
-                            is_definition: true,
-                        });
-                    }
+                    references.push(ReferenceInfo {
+                        file_path: decl_file_path,
+                        line: start_line_col.line + 1,
+                        column: start_line_col.col + 1,
+                        end_line: end_line_col.line + 1,
+                        end_column: end_line_col.col + 1,
+                        name: declaration.nav.name.to_string(),
+                        content,
+                        is_definition: true,
+                    });
                 }
             }
 
             // Process all references grouped by file
             for (ref_file_id, ref_ranges) in search_result.references {
-                if let Ok(ref_line_index) = analysis.file_line_index(ref_file_id) {
-                    if let Some(ref_file_path) = self.file_watcher.file_path(ref_file_id) {
-                        // Get file text once for this file
-                        if let Ok(file_text) = analysis.file_text(ref_file_id) {
-                            let symbol_name = search_result
-                                .declaration
-                                .as_ref()
-                                .map(|d| d.nav.name.to_string())
-                                .unwrap_or_else(|| "unknown".to_string());
+                if let Ok(ref_line_index) = analysis.file_line_index(ref_file_id)
+                    && let Some(ref_file_path) = self.file_watcher.file_path(ref_file_id)
+                {
+                    // Get file text once for this file
+                    if let Ok(file_text) = analysis.file_text(ref_file_id) {
+                        let symbol_name = search_result
+                            .declaration
+                            .as_ref()
+                            .map(|d| d.nav.name.to_string())
+                            .unwrap_or_else(|| "unknown".to_string());
 
-                            // Process each reference range in this file
-                            for (range, _category) in ref_ranges {
-                                let start_line_col = ref_line_index.line_col(range.start());
-                                let end_line_col = ref_line_index.line_col(range.end());
+                        // Process each reference range in this file
+                        for (range, _category) in ref_ranges {
+                            let start_line_col = ref_line_index.line_col(range.start());
+                            let end_line_col = ref_line_index.line_col(range.end());
 
-                                let content = Self::get_line_content(
-                                    &file_text,
-                                    start_line_col.line as usize,
-                                );
+                            let content =
+                                Self::get_line_content(&file_text, start_line_col.line as usize);
 
-                                references.push(ReferenceInfo {
-                                    file_path: ref_file_path.clone(),
-                                    line: start_line_col.line + 1,
-                                    column: start_line_col.col + 1,
-                                    end_line: end_line_col.line + 1,
-                                    end_column: end_line_col.col + 1,
-                                    name: symbol_name.clone(),
-                                    content,
-                                    is_definition: false,
-                                });
-                            }
+                            references.push(ReferenceInfo {
+                                file_path: ref_file_path.clone(),
+                                line: start_line_col.line + 1,
+                                column: start_line_col.col + 1,
+                                end_line: end_line_col.line + 1,
+                                end_column: end_line_col.col + 1,
+                                name: symbol_name.clone(),
+                                content,
+                                is_definition: false,
+                            });
                         }
                     }
                 }

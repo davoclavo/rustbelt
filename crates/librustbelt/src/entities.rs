@@ -60,16 +60,15 @@ impl CursorCoordinates {
 
         // Search line by line within the tolerance box
         for actual_line_number in line_range {
-            if let Some(line) = lines.get(actual_line_number - 1) {
-                if let Some(column_pos) = self.find_symbol_in_line(line, symbol, actual_line_number)
-                {
-                    return Some(CursorCoordinates {
-                        file_path: self.file_path.clone(),
-                        line: actual_line_number as u32,
-                        column: column_pos,
-                        symbol: self.symbol.clone(),
-                    });
-                }
+            if let Some(line) = lines.get(actual_line_number - 1)
+                && let Some(column_pos) = self.find_symbol_in_line(line, symbol, actual_line_number)
+            {
+                return Some(CursorCoordinates {
+                    file_path: self.file_path.clone(),
+                    line: actual_line_number as u32,
+                    column: column_pos,
+                    symbol: self.symbol.clone(),
+                });
             }
         }
 
