@@ -22,7 +22,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Start the MCP server (defaults to stdio mode)
-    Serve {
+    Mcp {
         /// Use TCP mode instead of default stdio mode
         #[arg(long)]
         tcp: bool,
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { tcp, host, port } => {
+        Commands::Mcp { tcp, host, port } => {
             if tcp {
                 // Run in TCP mode
                 // Only initialize logging for TCP mode

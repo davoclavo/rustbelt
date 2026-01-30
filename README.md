@@ -13,13 +13,13 @@ rustbelt bridges rust-analyzer's powerful IDE capabilities with the Model Contex
 Start the server in stdio mode for MCP clients (default):
 
 ```bash
-rustbelt serve
+rustbelt mcp
 ```
 
 Or start in TCP mode for debugging:
 
 ```bash
-rustbelt serve --tcp --host 127.0.0.1 --port 3001
+rustbelt mcp --tcp --host 127.0.0.1 --port 3001
 ```
 
 ### CLI Mode

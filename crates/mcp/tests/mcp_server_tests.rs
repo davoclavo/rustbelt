@@ -51,7 +51,7 @@ async fn create_test_client() -> Result<(Client<()>, SpawnedServer)> {
     let mut client = Client::new("test-client", "1.0.0");
 
     let mut cmd = TokioCommand::new(binary_path);
-    cmd.arg("serve");
+    cmd.arg("mcp");
 
     let spawned = client.connect_process(cmd).await?;
 

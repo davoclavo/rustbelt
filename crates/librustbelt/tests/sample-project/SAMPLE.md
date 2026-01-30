@@ -33,7 +33,7 @@ You can test type hints at various positions in `sample.rs`:
 
 ```bash
 # Start the mcp in stdio mode
-cargo run --bin rustbelt -- serve
+cargo run --bin rustbelt -- mcp
 
 # Then call the get_type_hint tool with:
 {
