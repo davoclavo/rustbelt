@@ -139,30 +139,28 @@ impl Rustbelt {
 #[mcp_server]
 impl Rustbelt {
     /// Generate a Rust code skeleton for a crate, showing its public API structure
-    /// returns a single Rust source file that lists the
-    /// *public API (or optionally private items) of any crate or module path, with all
-    /// bodies stripped*. Useful for large‑language models that need to look up item
-    /// names, signatures, derives, feature‑gated cfgs, and doc‑comments while writing
-    /// or reviewing Rust code.
     ///
-    /// ### When a model should call this tool
-    /// 1. It needs a function/trait/struct signature it can't recall.
-    /// 2. The user asks for examples or docs from a crate.
-    /// 3. The model wants to verify what features gate a symbol.
+    /// Returns a Rust source file listing the public API (or optionally private items)
+    /// of any crate or module path, with all bodies stripped. Useful for looking up
+    /// signatures, derives, feature-gated cfgs, and doc-comments.
     ///
-    /// ### Target syntax examples
-    /// - `serde`               →  latest serde on crates.io
-    /// - `serde@1.0.160`      →  specific published version
-    /// - `serde::de::Deserialize` →  narrow output to one module/type for small contexts
-    /// - `/path/to/crate` or `/path/to/crate::submod` →  local workspace paths
+    /// ## When to use
     ///
-    /// ### Output format
-    /// Plain UTF‑8 text containing valid Rust code, with implementation omitted.
+    /// - You need a function/trait/struct signature you can't recall.
+    /// - You want to see the full API surface of a crate or module.
+    /// - You need to verify what features gate a symbol.
     ///
-    /// ### Tips for LLMs
-    /// - Request deep module paths (e.g. `tokio::sync::mpsc`) to keep the reply below
-    ///   your token budget.
-    /// - Pass `all_features=true` or `features=[…]` when a symbol is behind a feature gate.
+    /// ## Target syntax
+    ///
+    /// - `serde` → latest on crates.io
+    /// - `serde@1.0.160` → specific version
+    /// - `serde::de::Deserialize` → narrow to one module/type (keeps output small)
+    /// - `/path/to/crate` or `/path/to/crate::submod` → local workspace paths
+    ///
+    /// ## Tips
+    ///
+    /// - Use deep module paths (e.g. `tokio::sync::mpsc`) to keep output small.
+    /// - Pass `all_features=true` or `features=[…]` for feature-gated symbols.
     #[tool]
     async fn ruskel(&self, _ctx: &ServerCtx, params: RuskelParams) -> ToolResult {
         let ruskel = Ruskel::new();
@@ -183,11 +181,21 @@ impl Rustbelt {
 
     /// Get type information for a symbol at a specific position in Rust code
     ///
-    /// Provides detailed type information including variable types, function signatures,
-    /// struct/enum definitions, and generic parameters. Use this when you need to understand
-    /// the type of a symbol for code analysis, refactoring, or generating type-aware code.
+    /// Returns the resolved type of a symbol (variable, expression, function, etc.)
+    /// including generic parameters. Useful for complex inferred types that aren't
+    /// obvious from reading the code.
     ///
-    /// Returns human-readable type information or indicates if no type data is available.
+    /// ## When to use
+    ///
+    /// - Complex inferred types: iterator chains, builder patterns, generic instantiations.
+    /// - `impl Trait` or trait object returns where the concrete type matters.
+    /// - Resolving what `T` becomes in a specific generic context.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Type is obvious: `let s = String::new()`, `let n: u32 = 5`.
+    /// - You need the full API signature — use `ruskel` instead.
+    /// - You need the definition location — use `get_definition` instead.
     #[tool]
     async fn get_type_hint(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -219,11 +227,20 @@ impl Rustbelt {
 
     /// Get definition location for a symbol at a specific position in Rust code
     ///
-    /// Finds where symbols are defined - functions, types, variables, modules, macros,
-    /// and more. Essential for code navigation and understanding symbol relationships.
+    /// Finds where a symbol is defined — functions, types, variables, modules, macros.
+    /// Returns locations as "file_path:line_number:column_number".
     ///
-    /// Returns definition locations as "file_path:line_number:column_number" format,
-    /// or indicates if no definitions are found.
+    /// ## When to use
+    ///
+    /// - Navigating to symbols from external crates or distant modules.
+    /// - Resolving re-exports or macro definitions to their actual source.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Definition is in the same file — just read it.
+    /// - You need the full API surface — use `ruskel` instead.
+    /// - You need the *type*, not the location — use `get_type_hint`.
+    /// - You need all *usages* — use `find_references`.
     #[tool]
     async fn get_definition(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -262,10 +279,20 @@ impl Rustbelt {
 
     /// Get completion suggestions at a specific position in Rust code
     ///
-    /// Provides intelligent code completion suggestions including available methods,
-    /// functions, variables, keywords, imports, and more based on the current context.
+    /// Returns context-aware completion suggestions: methods, functions, variables,
+    /// enum variants, imports, and keywords available at the cursor position.
     ///
-    /// Returns a list of completion suggestions with types and descriptions.
+    /// ## When to use
+    ///
+    /// - Discovering available methods on an unfamiliar type (cursor after `.`).
+    /// - Listing enum variants (cursor after `EnumName::`).
+    /// - Finding importable symbols from a module.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You already know the symbol name — just write the code.
+    /// - You need the full API with signatures — use `ruskel` instead.
+    /// - You need the type of a specific symbol — use `get_type_hint`.
     #[tool]
     async fn get_completions(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -304,12 +331,21 @@ impl Rustbelt {
 
     /// Rename a symbol across the workspace
     ///
-    /// Performs intelligent, workspace-wide symbol renaming that preserves code
-    /// correctness and updates all references. Works with functions, types, variables,
-    /// modules, macros, and more.
+    /// Performs workspace-wide symbol renaming that updates all references. Works with
+    /// functions, types, variables, struct fields, enum variants, modules, and macros.
+    /// Writes changes to disk immediately.
     ///
-    /// Returns a summary of all changes made with file paths and line numbers, or
-    /// explains why the rename is not possible.
+    /// ## When to use
+    ///
+    /// - Symbol is referenced across multiple files or crates in the workspace.
+    /// - Renaming struct fields, enum variants, or trait methods that propagate to
+    ///   impl blocks, pattern matches, and call sites.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Symbol is used in one place — just edit directly.
+    /// - Renaming files/directories — use shell commands.
+    /// - Only renames semantic references, not string literals or comments.
     #[tool]
     async fn rename_symbol(&self, _ctx: &ServerCtx, params: RenameParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -341,15 +377,21 @@ impl Rustbelt {
 
     /// View a Rust file with inlay hints embedded
     ///
-    /// Enhances code readability by displaying inline type annotations and other
-    /// helpful hints directly within the source code, including inferred types,
-    /// parameter names, return types, and implicit conversions.
+    /// Returns source code with inline type annotations, parameter names, and other
+    /// hints embedded directly in the text. Use `start_line`/`end_line` to limit
+    /// the range (1-based, inclusive). Without them, the entire file is processed.
     ///
-    /// If start_line and end_line are provided, only the specified range of lines
-    /// will be returned with inlay hints. Both parameters are 1-based and inclusive.
-    /// If neither parameter is provided, the entire file is processed.
+    /// ## When to use
     ///
-    /// Returns the source file content (full file or specified range) with inlay hints embedded as inline annotations.
+    /// - Iterator chains and closures where element types aren't obvious.
+    /// - Destructured tuples from external APIs (e.g. `(FileId, (TextEdit, Option<SnippetEdit>))`).
+    /// - Nested generics: `Arc<LineIndex>`, `Option<Vec<ReferenceInfo>>`.
+    /// - Parameter name hints on unfamiliar API calls.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Types are obvious from context: `Cli::parse()`, `format!(...)`, nearby enum patterns.
+    /// - Simple `let` bindings where the RHS makes the type self-evident.
     #[tool]
     async fn view_inlay_hints(&self, _ctx: &ServerCtx, params: ViewInlayHintsParams) -> ToolResult {
         self.ensure_analyzer(&params.file_path).await?;
@@ -371,12 +413,20 @@ impl Rustbelt {
 
     /// Find all references to a symbol at a specific position in Rust code
     ///
-    /// Searches for all references to a symbol (function, variable, type, etc.)
-    /// throughout the workspace, including both the definition and all usage sites.
-    /// Essential for understanding code dependencies and refactoring operations.
+    /// Returns all semantic references to a symbol across the workspace, including
+    /// the definition site and every usage. Results include file paths, line numbers,
+    /// and surrounding context.
     ///
-    /// Returns a list of reference locations with file paths, line numbers, and
-    /// contextual information, or indicates if no references are found.
+    /// ## When to use
+    ///
+    /// - Before refactoring or deleting — understand the blast radius across the workspace.
+    /// - Checking if a struct field, trait method, or function can be safely changed.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You just need the definition location — use `get_definition`.
+    /// - Searching for a string pattern, not a semantic symbol — use grep instead.
+    /// - Symbol is obviously local (loop variable, short function) — just read the code.
     #[tool]
     async fn find_references(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -415,11 +465,22 @@ impl Rustbelt {
 
     /// Get available code assists (code actions) at a specific position in Rust code
     ///
-    /// Returns available assists like "extract function", "merge imports", "add missing impl", etc.
-    /// These are context-sensitive refactoring and code transformation options that rust-analyzer
-    /// can apply to improve or modify your code.
+    /// Lists context-sensitive refactoring actions available at a cursor position.
+    /// This is a read-only discovery step — use `apply_assist` with a returned ID
+    /// to actually perform the transformation.
     ///
-    /// Returns a list of available assists with their IDs, descriptions, and target ranges.
+    /// Common assists: `extract_function`, `extract_variable`, `inline_call`,
+    /// `add_missing_impl_members`, `merge_imports`.
+    ///
+    /// ## When to use
+    ///
+    /// - Before manually refactoring — check if an automated assist exists.
+    /// - Exploring what transformations are possible at a given position.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You already know the assist ID — skip to `apply_assist`.
+    /// - Simple text edits — just edit the file directly.
     #[tool]
     async fn get_assists(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
         let cursor = CursorCoordinates {
@@ -458,12 +519,19 @@ impl Rustbelt {
 
     /// Apply a specific code assist (code action) at a position in Rust code
     ///
-    /// Takes an assist ID (from get_assists) and applies the corresponding code transformation
-    /// to your source files. This will modify files on disk with the changes suggested by
-    /// the assist.
+    /// Applies a code transformation identified by an assist ID from `get_assists`.
+    /// Writes changes to disk immediately. Two-step workflow:
+    /// 1. `get_assists` at a position → discover available assist IDs.
+    /// 2. `apply_assist` with the chosen ID → apply the change.
     ///
-    /// Common assists include "merge_imports", "extract_function", "add_missing_impl", etc.
-    /// Returns a summary of the changes made to files.
+    /// ## When to use
+    ///
+    /// - After `get_assists` returned an assist you want to apply.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Don't guess assist IDs — always call `get_assists` first.
+    /// - Simple text edits — just edit the file directly.
     #[tool]
     async fn apply_assist(&self, _ctx: &ServerCtx, params: ApplyAssistParams) -> ToolResult {
         let cursor = CursorCoordinates {
