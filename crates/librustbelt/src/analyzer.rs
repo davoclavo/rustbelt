@@ -9,22 +9,25 @@ use std::path::PathBuf;
 use anyhow::Result;
 use ra_ap_hir::ClosureStyle;
 use ra_ap_ide::{
-    AdjustmentHints, AdjustmentHintsMode, Analysis, AnalysisHost, CallableSnippets,
-    ClosureReturnTypeHints, CompletionConfig, CompletionFieldsToResolve,
-    CompletionItemKind as RaCompletionItemKind, DiscriminantHints, FileId, FilePosition, FileRange,
-    FindAllRefsConfig, GenericParameterHints, GotoDefinitionConfig, HoverConfig, HoverDocFormat,
+    AdjustmentHints, AdjustmentHintsMode, Analysis, AnalysisHost, CallHierarchyConfig,
+    CallableSnippets, ClosureReturnTypeHints, CompletionConfig, CompletionFieldsToResolve,
+    CompletionItemKind as RaCompletionItemKind, DiagnosticsConfig, DiscriminantHints, FileId,
+    FilePosition, FileRange, FileStructureConfig, FindAllRefsConfig, GenericParameterHints,
+    GotoDefinitionConfig, GotoImplementationConfig, HoverConfig, HoverDocFormat,
     InlayFieldsToResolve, InlayHintPosition, InlayHintsConfig, LifetimeElisionHints, LineCol,
     LineIndex, MonikerResult, RenameConfig, SubstTyLen, TextRange, TextSize,
 };
 use ra_ap_ide_assists::{AssistConfig, AssistResolveStrategy, assists};
 use ra_ap_ide_db::MiniCore;
 use ra_ap_ide_db::imports::insert_use::{ImportGranularity, InsertUseConfig, PrefixKind};
+use ra_ap_ide_db::symbol_index::Query;
 use ra_ap_ide_db::text_edit::TextEditBuilder;
 use tracing::{debug, trace, warn};
 
 use super::entities::{
-    AssistInfo, AssistSourceChange, CompletionItem, CursorCoordinates, DefinitionInfo, FileChange,
-    ReferenceInfo, RenameResult, TextEdit, TypeHint,
+    AssistInfo, AssistSourceChange, CallerInfo, CompletionItem, CursorCoordinates, DefinitionInfo,
+    DiagnosticFix, DiagnosticInfo, FileChange, FileOutlineItem, MacroExpansion, ReferenceInfo,
+    RenameResult, SignatureInfo, SymbolAnalysis, SymbolSearchResult, TextEdit, TypeHint,
 };
 use super::file_watcher::FileWatcher;
 use super::utils::RustAnalyzerUtils;
@@ -1132,6 +1135,458 @@ impl RustAnalyzerish {
             }
         } else {
             Ok(None)
+        }
+    }
+
+    // --- New agent-native tools ---
+
+    /// Get diagnostics for a file, including quick-fixes
+    pub async fn get_diagnostics(&mut self, file_path: &str) -> Result<Vec<DiagnosticInfo>> {
+        let path = PathBuf::from(file_path);
+
+        self.file_watcher.drain_and_apply_changes(&mut self.host)?;
+
+        let analysis = self.host.analysis();
+        let file_id = self.file_watcher.get_file_id(&path)?;
+
+        let line_index = analysis
+            .file_line_index(file_id)
+            .map_err(|_| anyhow::anyhow!("Failed to get line index for file: {}", file_path))?;
+
+        let diagnostics_config = DiagnosticsConfig {
+            enabled: true,
+            proc_macros_enabled: true,
+            proc_attr_macros_enabled: true,
+            disable_experimental: false,
+            disabled: Default::default(),
+            expr_fill_default: ra_ap_ide_db::assists::ExprFillDefaultMode::Todo,
+            style_lints: false,
+            snippet_cap: None,
+            insert_use: InsertUseConfig {
+                granularity: ImportGranularity::Crate,
+                enforce_granularity: true,
+                prefix_kind: PrefixKind::Plain,
+                group: true,
+                skip_glob_imports: true,
+            },
+            prefer_no_std: false,
+            prefer_prelude: true,
+            prefer_absolute: false,
+            term_search_fuel: 400,
+            term_search_borrowck: true,
+            show_rename_conflicts: true,
+        };
+
+        let ra_diagnostics = analysis
+            .full_diagnostics(&diagnostics_config, AssistResolveStrategy::All, file_id)
+            .map_err(|e| anyhow::anyhow!("Failed to get diagnostics: {:?}", e))?;
+
+        let mut result = Vec::new();
+        for d in ra_diagnostics {
+            let start = line_index.line_col(d.range.range.start());
+            let end = line_index.line_col(d.range.range.end());
+
+            let severity = format!("{:?}", d.severity);
+            let code = d.code.as_str().to_string();
+
+            let fixes = d
+                .fixes
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|assist| {
+                    let source_change = assist.source_change?;
+                    let file_changes = source_change
+                        .source_file_edits
+                        .into_iter()
+                        .map(|(fid, (text_edit, _snippet))| {
+                            let fp = self
+                                .file_watcher
+                                .file_path(fid)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            let li = analysis.file_line_index(fid).ok();
+                            let edits = text_edit
+                                .into_iter()
+                                .map(|indel| {
+                                    let (sl, sc, el, ec) = if let Some(ref li) = li {
+                                        let s = li.line_col(indel.delete.start());
+                                        let e = li.line_col(indel.delete.end());
+                                        (s.line + 1, s.col + 1, e.line + 1, e.col + 1)
+                                    } else {
+                                        (0, 0, 0, 0)
+                                    };
+                                    TextEdit {
+                                        line: sl,
+                                        column: sc,
+                                        end_line: el,
+                                        end_column: ec,
+                                        new_text: indel.insert,
+                                    }
+                                })
+                                .collect();
+                            FileChange {
+                                file_path: fp,
+                                edits,
+                            }
+                        })
+                        .collect();
+                    Some(DiagnosticFix {
+                        label: assist.label.to_string(),
+                        file_changes,
+                    })
+                })
+                .collect();
+
+            result.push(DiagnosticInfo {
+                message: d.message,
+                severity,
+                code,
+                file_path: file_path.to_string(),
+                line: start.line + 1,
+                column: start.col + 1,
+                end_line: end.line + 1,
+                end_column: end.col + 1,
+                fixes,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Analyze a symbol comprehensively — type, definition, implementations, callers, ref count
+    pub async fn analyze_symbol(
+        &mut self,
+        raw_cursor: &CursorCoordinates,
+    ) -> Result<SymbolAnalysis> {
+        let (analysis, file_id, offset, _cursor) = self.setup_cursor_analysis(raw_cursor).await?;
+        let position = Self::create_file_position(file_id, offset);
+
+        // --- Hover / type info ---
+        let hover_config = HoverConfig {
+            links_in_hover: true,
+            memory_layout: None,
+            documentation: true,
+            keywords: true,
+            format: HoverDocFormat::PlainText,
+            max_trait_assoc_items_count: Some(10),
+            max_fields_count: Some(10),
+            max_enum_variants_count: Some(10),
+            max_subst_ty_len: SubstTyLen::Unlimited,
+            show_drop_glue: false,
+            minicore: MiniCore::default(),
+        };
+        let text_range = TextRange::new(offset, offset);
+        let hover_result = analysis.hover(
+            &hover_config,
+            FileRange {
+                file_id,
+                range: text_range,
+            },
+        );
+        let (type_info, canonical_types) = match hover_result {
+            Ok(Some(hr)) => {
+                let ti = hr.info.markup.to_string();
+                let ct: Vec<String> = hr
+                    .info
+                    .actions
+                    .into_iter()
+                    .flat_map(|a| match a {
+                        ra_ap_ide::HoverAction::GoToType(types) => {
+                            types.into_iter().map(|t| t.mod_path).collect::<Vec<_>>()
+                        }
+                        _ => vec![],
+                    })
+                    .collect();
+                (Some(ti), ct)
+            }
+            _ => (None, vec![]),
+        };
+
+        // --- Definition ---
+        let goto_config = GotoDefinitionConfig {
+            minicore: MiniCore::default(),
+        };
+        let definitions = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            analysis.goto_definition(position, &goto_config)
+        })) {
+            Ok(Ok(Some(range_info))) => self.convert_nav_targets(&analysis, &range_info.info),
+            _ => vec![],
+        };
+
+        // --- Implementations ---
+        let impl_config = GotoImplementationConfig {
+            filter_adjacent_derive_implementations: true,
+        };
+        let implementations = match analysis.goto_implementation(&impl_config, position) {
+            Ok(Some(range_info)) => self.convert_nav_targets(&analysis, &range_info.info),
+            _ => vec![],
+        };
+
+        // --- Call hierarchy (callers/callees) ---
+        let call_config = CallHierarchyConfig {
+            exclude_tests: false,
+            minicore: MiniCore::default(),
+        };
+        let callers = match analysis.incoming_calls(&call_config, position) {
+            Ok(Some(items)) => items
+                .into_iter()
+                .map(|item| {
+                    let fp = self
+                        .file_watcher
+                        .file_path(item.target.file_id)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let (line, col) = analysis
+                        .file_line_index(item.target.file_id)
+                        .ok()
+                        .and_then(|li| {
+                            Some({
+                                let lc = li.line_col(item.target.focus_or_full_range().start());
+                                (lc.line + 1, lc.col + 1)
+                            })
+                        })
+                        .unwrap_or((0, 0));
+                    CallerInfo {
+                        name: item.target.name.to_string(),
+                        file_path: fp,
+                        line,
+                        column: col,
+                    }
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        let callees = match analysis.outgoing_calls(&call_config, position) {
+            Ok(Some(items)) => items
+                .into_iter()
+                .map(|item| {
+                    let fp = self
+                        .file_watcher
+                        .file_path(item.target.file_id)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let (line, col) = analysis
+                        .file_line_index(item.target.file_id)
+                        .ok()
+                        .and_then(|li| {
+                            Some({
+                                let lc = li.line_col(item.target.focus_or_full_range().start());
+                                (lc.line + 1, lc.col + 1)
+                            })
+                        })
+                        .unwrap_or((0, 0));
+                    CallerInfo {
+                        name: item.target.name.to_string(),
+                        file_path: fp,
+                        line,
+                        column: col,
+                    }
+                })
+                .collect(),
+            _ => vec![],
+        };
+
+        // --- Reference count ---
+        let find_refs_config = FindAllRefsConfig {
+            search_scope: None,
+            minicore: MiniCore::default(),
+        };
+        let reference_count = match analysis.find_all_refs(position, &find_refs_config) {
+            Ok(Some(results)) => results
+                .into_iter()
+                .map(|r| r.references.values().map(|refs| refs.len()).sum::<usize>())
+                .sum(),
+            _ => 0,
+        };
+
+        Ok(SymbolAnalysis {
+            type_info,
+            canonical_types,
+            definitions,
+            implementations,
+            callers,
+            callees,
+            reference_count,
+        })
+    }
+
+    /// Convert NavigationTargets to DefinitionInfo (shared helper)
+    fn convert_nav_targets(
+        &self,
+        analysis: &Analysis,
+        navs: &[ra_ap_ide::NavigationTarget],
+    ) -> Vec<DefinitionInfo> {
+        let mut result = Vec::new();
+        for nav in navs {
+            let Some(file_path) = self.file_watcher.file_path(nav.file_id) else {
+                continue;
+            };
+            let Ok(line_index) = analysis.file_line_index(nav.file_id) else {
+                continue;
+            };
+            let start = line_index.line_col(nav.focus_or_full_range().start());
+            let end = line_index.line_col(nav.focus_or_full_range().end());
+
+            let content = analysis
+                .file_text(nav.file_id)
+                .ok()
+                .map(|src| {
+                    let s: usize = nav.full_range.start().into();
+                    let e: usize = nav.full_range.end().into();
+                    if s < src.len() && e <= src.len() {
+                        src[s..e].to_string()
+                    } else {
+                        String::new()
+                    }
+                })
+                .unwrap_or_default();
+
+            result.push(DefinitionInfo {
+                file_path,
+                line: start.line + 1,
+                column: start.col + 1,
+                end_line: end.line + 1,
+                end_column: end.col + 1,
+                name: nav.name.to_string(),
+                kind: nav.kind,
+                description: nav.description.clone(),
+                module: nav
+                    .container_name
+                    .as_ref()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default(),
+                content,
+            });
+        }
+        result
+    }
+
+    /// Get the outline/structure of a file
+    pub async fn get_file_outline(&mut self, file_path: &str) -> Result<Vec<FileOutlineItem>> {
+        let path = PathBuf::from(file_path);
+
+        self.file_watcher.drain_and_apply_changes(&mut self.host)?;
+
+        let analysis = self.host.analysis();
+        let file_id = self.file_watcher.get_file_id(&path)?;
+
+        let line_index = analysis
+            .file_line_index(file_id)
+            .map_err(|_| anyhow::anyhow!("Failed to get line index for file: {}", file_path))?;
+
+        let config = FileStructureConfig {
+            exclude_locals: true,
+        };
+
+        let nodes = analysis
+            .file_structure(&config, file_id)
+            .map_err(|e| anyhow::anyhow!("Failed to get file structure: {:?}", e))?;
+
+        let items = nodes
+            .into_iter()
+            .map(|node| {
+                let start = line_index.line_col(node.node_range.start());
+                let end = line_index.line_col(node.node_range.end());
+
+                let kind = match node.kind {
+                    ra_ap_ide::StructureNodeKind::SymbolKind(sk) => format!("{:?}", sk),
+                    ra_ap_ide::StructureNodeKind::ExternBlock => "ExternBlock".to_string(),
+                    ra_ap_ide::StructureNodeKind::Region => "Region".to_string(),
+                };
+
+                FileOutlineItem {
+                    name: node.label,
+                    kind,
+                    detail: node.detail,
+                    line: start.line + 1,
+                    end_line: end.line + 1,
+                    parent_idx: node.parent,
+                    deprecated: node.deprecated,
+                }
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Search for symbols across the workspace
+    pub async fn search_symbols(
+        &mut self,
+        query_str: &str,
+        limit: usize,
+    ) -> Result<Vec<SymbolSearchResult>> {
+        self.file_watcher.drain_and_apply_changes(&mut self.host)?;
+
+        let analysis = self.host.analysis();
+        let query = Query::new(query_str.to_string());
+
+        let nav_targets = analysis
+            .symbol_search(query, limit)
+            .map_err(|e| anyhow::anyhow!("Symbol search failed: {:?}", e))?;
+
+        let results = nav_targets
+            .into_iter()
+            .filter_map(|nav| {
+                let file_path = self.file_watcher.file_path(nav.file_id)?;
+                let line_index = analysis.file_line_index(nav.file_id).ok()?;
+                let start = line_index.line_col(nav.focus_or_full_range().start());
+
+                let kind = nav.kind.map(|k| format!("{:?}", k));
+
+                Some(SymbolSearchResult {
+                    name: nav.name.to_string(),
+                    kind,
+                    file_path,
+                    line: start.line + 1,
+                    column: start.col + 1,
+                    container: nav.container_name.as_ref().map(|n| n.to_string()),
+                    description: nav.description,
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
+
+    /// Expand a macro at the given position
+    pub async fn expand_macro(
+        &mut self,
+        raw_cursor: &CursorCoordinates,
+    ) -> Result<Option<MacroExpansion>> {
+        let (analysis, file_id, offset, _cursor) = self.setup_cursor_analysis(raw_cursor).await?;
+        let position = Self::create_file_position(file_id, offset);
+
+        match analysis.expand_macro(position) {
+            Ok(Some(expanded)) => Ok(Some(MacroExpansion {
+                name: expanded.name,
+                expansion: expanded.expansion,
+            })),
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Macro expansion failed: {:?}", e)),
+        }
+    }
+
+    /// Get signature help at a call site
+    pub async fn get_signature_help(
+        &mut self,
+        raw_cursor: &CursorCoordinates,
+    ) -> Result<Option<SignatureInfo>> {
+        let (analysis, file_id, offset, _cursor) = self.setup_cursor_analysis(raw_cursor).await?;
+        let position = Self::create_file_position(file_id, offset);
+
+        match analysis.signature_help(position) {
+            Ok(Some(sig)) => {
+                let parameters: Vec<String> =
+                    sig.parameter_labels().map(|s| s.to_string()).collect();
+                let documentation = sig.doc.as_ref().map(|d| d.as_str().to_string());
+
+                Ok(Some(SignatureInfo {
+                    signature: sig.signature,
+                    parameters,
+                    active_parameter: sig.active_parameter,
+                    documentation,
+                }))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(anyhow::anyhow!("Signature help failed: {:?}", e)),
         }
     }
 }

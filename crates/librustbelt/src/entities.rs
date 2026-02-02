@@ -1,6 +1,7 @@
 use ra_ap_ide::LineCol;
 use ra_ap_ide_db::SymbolKind;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 const TOLERANCE: u32 = 5;
 /// Cursor coordinates for specifying position in a file
@@ -353,5 +354,243 @@ pub struct AssistSourceChange {
 impl std::fmt::Display for AssistSourceChange {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Changes to {} files", self.file_changes.len())
+    }
+}
+
+// --- New agent-native entity types ---
+
+/// A single diagnostic fix with inline source changes
+#[derive(Debug, Clone)]
+pub struct DiagnosticFix {
+    pub label: String,
+    pub file_changes: Vec<FileChange>,
+}
+
+/// A diagnostic with optional quick-fixes
+#[derive(Debug, Clone)]
+pub struct DiagnosticInfo {
+    pub message: String,
+    pub severity: String,
+    pub code: String,
+    pub file_path: String,
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    pub fixes: Vec<DiagnosticFix>,
+}
+
+impl fmt::Display for DiagnosticFix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "  fix: {}", self.label)?;
+        for fc in &self.file_changes {
+            write!(f, "\n    {fc}")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for DiagnosticInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "[{}] {}:{}:{}: {} ({})",
+            self.severity, self.file_path, self.line, self.column, self.message, self.code
+        )?;
+        for fix in &self.fixes {
+            write!(f, "\n{fix}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Compound result for analyze_symbol — everything about a symbol in one call
+#[derive(Debug, Clone)]
+pub struct SymbolAnalysis {
+    /// Type/hover info (markdown)
+    pub type_info: Option<String>,
+    /// Canonical type paths
+    pub canonical_types: Vec<String>,
+    /// Definition locations
+    pub definitions: Vec<DefinitionInfo>,
+    /// Implementations (trait implementors or implemented traits)
+    pub implementations: Vec<DefinitionInfo>,
+    /// Incoming callers (if it's a function)
+    pub callers: Vec<CallerInfo>,
+    /// Outgoing calls (if it's a function)
+    pub callees: Vec<CallerInfo>,
+    /// Number of references across the workspace
+    pub reference_count: usize,
+}
+
+/// A caller/callee entry
+#[derive(Debug, Clone)]
+pub struct CallerInfo {
+    pub name: String,
+    pub file_path: String,
+    pub line: u32,
+    pub column: u32,
+}
+
+impl fmt::Display for CallerInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{} ({})",
+            self.file_path, self.line, self.column, self.name
+        )
+    }
+}
+
+impl fmt::Display for SymbolAnalysis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(ref ti) = self.type_info {
+            writeln!(f, "## Type Info\n{ti}")?;
+        }
+        if !self.canonical_types.is_empty() {
+            writeln!(
+                f,
+                "\n## Canonical Types\n{}",
+                self.canonical_types.join(", ")
+            )?;
+        }
+        if !self.definitions.is_empty() {
+            writeln!(f, "\n## Definition")?;
+            for d in &self.definitions {
+                writeln!(f, "{d}")?;
+            }
+        }
+        if !self.implementations.is_empty() {
+            writeln!(f, "\n## Implementations ({})", self.implementations.len())?;
+            for imp in &self.implementations {
+                writeln!(
+                    f,
+                    "- {}:{}:{} {}",
+                    imp.file_path, imp.line, imp.column, imp.name
+                )?;
+            }
+        }
+        if !self.callers.is_empty() {
+            writeln!(f, "\n## Callers ({})", self.callers.len())?;
+            for c in &self.callers {
+                writeln!(f, "- {c}")?;
+            }
+        }
+        if !self.callees.is_empty() {
+            writeln!(f, "\n## Callees ({})", self.callees.len())?;
+            for c in &self.callees {
+                writeln!(f, "- {c}")?;
+            }
+        }
+        write!(f, "\n## References: {}", self.reference_count)?;
+        Ok(())
+    }
+}
+
+/// A file outline item (from file_structure)
+#[derive(Debug, Clone)]
+pub struct FileOutlineItem {
+    pub name: String,
+    pub kind: String,
+    pub detail: Option<String>,
+    pub line: u32,
+    pub end_line: u32,
+    pub parent_idx: Option<usize>,
+    pub deprecated: bool,
+}
+
+impl fmt::Display for FileOutlineItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "L{}-{} {} {}",
+            self.line, self.end_line, self.kind, self.name
+        )?;
+        if let Some(ref detail) = self.detail {
+            write!(f, " — {detail}")?;
+        }
+        if self.deprecated {
+            write!(f, " [deprecated]")?;
+        }
+        Ok(())
+    }
+}
+
+/// A workspace symbol search result
+#[derive(Debug, Clone)]
+pub struct SymbolSearchResult {
+    pub name: String,
+    pub kind: Option<String>,
+    pub file_path: String,
+    pub line: u32,
+    pub column: u32,
+    pub container: Option<String>,
+    pub description: Option<String>,
+}
+
+impl fmt::Display for SymbolSearchResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{} {}",
+            self.file_path, self.line, self.column, self.name
+        )?;
+        if let Some(ref kind) = self.kind {
+            write!(f, " ({kind})")?;
+        }
+        if let Some(ref container) = self.container {
+            write!(f, " in {container}")?;
+        }
+        if let Some(ref desc) = self.description {
+            write!(f, " — {desc}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Macro expansion result
+#[derive(Debug, Clone)]
+pub struct MacroExpansion {
+    pub name: String,
+    pub expansion: String,
+}
+
+impl fmt::Display for MacroExpansion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "Macro: {}\n\n```rust\n{}\n```",
+            self.name, self.expansion
+        )
+    }
+}
+
+/// Function signature help
+#[derive(Debug, Clone)]
+pub struct SignatureInfo {
+    pub signature: String,
+    pub parameters: Vec<String>,
+    pub active_parameter: Option<usize>,
+    pub documentation: Option<String>,
+}
+
+impl fmt::Display for SignatureInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{}", self.signature)?;
+        if !self.parameters.is_empty() {
+            writeln!(f, "\nParameters:")?;
+            for (i, param) in self.parameters.iter().enumerate() {
+                let marker = if self.active_parameter == Some(i) {
+                    " →"
+                } else {
+                    "  "
+                };
+                writeln!(f, "{marker} {param}")?;
+            }
+        }
+        if let Some(ref doc) = self.documentation {
+            write!(f, "\n{doc}")?;
+        }
+        Ok(())
     }
 }

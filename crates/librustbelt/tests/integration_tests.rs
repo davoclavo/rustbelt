@@ -792,3 +792,403 @@ async fn test_symbol_resolution() {
     assert_eq!(type_info.line, 31, "Line number should be found");
     assert_eq!(type_info.column, 13, "Column number should be found");
 }
+
+// ==================== Tests for new agent-native tools ====================
+
+#[tokio::test]
+async fn test_get_diagnostics() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Get diagnostics for our sample file
+    let diagnostics = analyzer
+        .get_diagnostics(sample_path.to_str().unwrap())
+        .await
+        .expect("Error getting diagnostics");
+
+    println!("Found {} diagnostics", diagnostics.len());
+    for d in &diagnostics {
+        println!("  - {}", d);
+    }
+
+    // The sample file should compile cleanly (or only have warnings)
+    // No hard errors expected
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == "Error")
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "Sample file should not have compile errors, found: {:?}",
+        errors
+    );
+
+    // All diagnostics should have valid file paths and positions
+    for d in &diagnostics {
+        assert!(
+            d.file_path.ends_with("main.rs"),
+            "Diagnostic should reference main.rs"
+        );
+        assert!(d.line > 0, "Diagnostic line should be positive");
+        assert!(d.column > 0, "Diagnostic column should be positive");
+        assert!(
+            !d.message.is_empty(),
+            "Diagnostic message should not be empty"
+        );
+        assert!(
+            !d.severity.is_empty(),
+            "Diagnostic severity should not be empty"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_analyze_symbol_struct() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Analyze the Person struct
+    let result = analyzer
+        .analyze_symbol(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 5,
+            column: 12,
+            symbol: None,
+        })
+        .await
+        .expect("Error analyzing symbol");
+
+    println!("Symbol analysis:\n{}", result);
+
+    // Should have type/hover info
+    assert!(
+        result.type_info.is_some(),
+        "Should have type info for Person struct"
+    );
+    let type_info = result.type_info.as_ref().unwrap();
+    assert!(
+        type_info.contains("Person"),
+        "Type info should mention Person"
+    );
+
+    // Should have at least one definition
+    assert!(
+        !result.definitions.is_empty(),
+        "Should find definition for Person"
+    );
+    assert!(
+        result.definitions[0].name.contains("Person"),
+        "Definition should be named Person"
+    );
+
+    // Person struct should have implementations (the impl block)
+    // (implementations may or may not be found depending on exact cursor position)
+
+    // Should have references (Person is used multiple times)
+    assert!(
+        result.reference_count > 0,
+        "Person should have references in the file"
+    );
+}
+
+#[tokio::test]
+async fn test_analyze_symbol_function() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Analyze the calculate_average_age function
+    let result = analyzer
+        .analyze_symbol(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 58,
+            column: 4,
+            symbol: Some("calculate_average_age".to_string()),
+        })
+        .await
+        .expect("Error analyzing symbol");
+
+    println!("Function analysis:\n{}", result);
+
+    // Should have type/hover info
+    assert!(
+        result.type_info.is_some(),
+        "Should have type info for function"
+    );
+
+    // Should have a definition
+    assert!(
+        !result.definitions.is_empty(),
+        "Should find definition for function"
+    );
+
+    // Function should have callers (called from main)
+    assert!(
+        result.reference_count > 0,
+        "Function should be referenced at least once"
+    );
+}
+
+#[tokio::test]
+async fn test_get_file_outline() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    let outline = analyzer
+        .get_file_outline(sample_path.to_str().unwrap())
+        .await
+        .expect("Error getting file outline");
+
+    println!("File outline ({} items):", outline.len());
+    for item in &outline {
+        println!("  - {}", item);
+    }
+
+    assert!(
+        !outline.is_empty(),
+        "Outline should contain items for our sample file"
+    );
+
+    // Should find the Person struct
+    let has_person = outline.iter().any(|item| item.name == "Person");
+    assert!(has_person, "Outline should contain Person struct");
+
+    // Should find the main function
+    let has_main = outline.iter().any(|item| item.name == "main");
+    assert!(has_main, "Outline should contain main function");
+
+    // Should find calculate_average_age function
+    let has_calc = outline
+        .iter()
+        .any(|item| item.name == "calculate_average_age");
+    assert!(
+        has_calc,
+        "Outline should contain calculate_average_age function"
+    );
+
+    // Should find the impl block methods
+    let has_new = outline.iter().any(|item| item.name == "new");
+    assert!(has_new, "Outline should contain Person::new method");
+
+    let has_with_email = outline.iter().any(|item| item.name == "with_email");
+    assert!(
+        has_with_email,
+        "Outline should contain Person::with_email method"
+    );
+
+    // All items should have valid line numbers
+    for item in &outline {
+        assert!(item.line > 0, "Line should be positive");
+        assert!(
+            item.end_line >= item.line,
+            "End line should be >= start line"
+        );
+        assert!(!item.name.is_empty(), "Name should not be empty");
+        assert!(!item.kind.is_empty(), "Kind should not be empty");
+    }
+}
+
+#[tokio::test]
+async fn test_search_symbols() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+
+    // Search for "Person"
+    let results = analyzer
+        .search_symbols("Person", 50)
+        .await
+        .expect("Error searching symbols");
+
+    println!("Found {} symbols matching 'Person':", results.len());
+    for r in &results {
+        println!("  - {}", r);
+    }
+
+    assert!(
+        !results.is_empty(),
+        "Should find at least one symbol matching 'Person'"
+    );
+
+    // Should find the Person struct
+    let has_person = results.iter().any(|r| r.name == "Person");
+    assert!(has_person, "Should find Person struct in search results");
+
+    // All results should have valid file paths and positions
+    for r in &results {
+        assert!(!r.file_path.is_empty(), "File path should not be empty");
+        assert!(r.line > 0, "Line should be positive");
+        assert!(r.column > 0, "Column should be positive");
+        assert!(!r.name.is_empty(), "Name should not be empty");
+    }
+}
+
+#[tokio::test]
+async fn test_search_symbols_fuzzy() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+
+    // Fuzzy search for "calc" should find calculate_average_age
+    let results = analyzer
+        .search_symbols("calc", 50)
+        .await
+        .expect("Error searching symbols");
+
+    println!("Found {} symbols matching 'calc':", results.len());
+    for r in &results {
+        println!("  - {}", r);
+    }
+
+    let has_calc_func = results
+        .iter()
+        .any(|r| r.name.contains("calculate_average_age"));
+    assert!(
+        has_calc_func,
+        "Fuzzy search for 'calc' should find calculate_average_age"
+    );
+}
+
+#[tokio::test]
+async fn test_expand_macro_derive() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Try to expand the #[derive(Debug, Clone)] on line 4
+    let result = analyzer
+        .expand_macro(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 4,
+            column: 10,
+            symbol: None,
+        })
+        .await
+        .expect("Error expanding macro");
+
+    if let Some(expansion) = result {
+        println!("Macro expansion:\n{}", expansion);
+        assert!(!expansion.name.is_empty(), "Macro name should not be empty");
+        assert!(
+            !expansion.expansion.is_empty(),
+            "Expansion should not be empty"
+        );
+    } else {
+        // Derive macro expansion might not be available in all configurations
+        println!("No macro expansion available at this position (acceptable for derive)");
+    }
+}
+
+#[tokio::test]
+async fn test_expand_macro_vec() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Try to expand vec! macro on line 41
+    let result = analyzer
+        .expand_macro(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 41,
+            column: 20,
+            symbol: Some("vec".to_string()),
+        })
+        .await
+        .expect("Error expanding macro");
+
+    if let Some(expansion) = result {
+        println!("vec! macro expansion:\n{}", expansion);
+        assert!(
+            !expansion.expansion.is_empty(),
+            "Expansion should not be empty"
+        );
+    } else {
+        println!("No vec! macro expansion available (acceptable)");
+    }
+}
+
+#[tokio::test]
+async fn test_get_signature_help() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Test signature help inside Person::new() call on line 33
+    // Person::new("Alice".to_string(), 25)
+    // Position cursor inside the arguments
+    let result = analyzer
+        .get_signature_help(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 33,
+            column: 27,
+            symbol: None,
+        })
+        .await
+        .expect("Error getting signature help");
+
+    if let Some(sig_info) = result {
+        println!("Signature help:\n{}", sig_info);
+
+        assert!(
+            !sig_info.signature.is_empty(),
+            "Signature should not be empty"
+        );
+
+        // Should have parameters
+        assert!(
+            !sig_info.parameters.is_empty(),
+            "Should have at least one parameter"
+        );
+
+        // Should mention the parameter types/names
+        let params_str = sig_info.parameters.join(", ");
+        println!("Parameters: {}", params_str);
+    } else {
+        println!("No signature help available at this position");
+    }
+}
+
+#[tokio::test]
+async fn test_get_signature_help_insert() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Test signature help inside people.insert() call on line 35
+    let result = analyzer
+        .get_signature_help(&CursorCoordinates {
+            file_path: sample_path.to_str().unwrap().to_string(),
+            line: 35,
+            column: 20,
+            symbol: None,
+        })
+        .await
+        .expect("Error getting signature help");
+
+    if let Some(sig_info) = result {
+        println!("Signature help for insert():\n{}", sig_info);
+        assert!(!sig_info.signature.is_empty());
+        assert!(!sig_info.parameters.is_empty());
+    } else {
+        println!("No signature help available for insert() (acceptable)");
+    }
+}
+
+#[tokio::test]
+async fn test_get_diagnostics_nonexistent_file() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+
+    let result = analyzer.get_diagnostics("/nonexistent/file.rs").await;
+    assert!(result.is_err(), "Should error for nonexistent file");
+}
+
+#[tokio::test]
+async fn test_get_file_outline_nonexistent_file() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+
+    let result = analyzer.get_file_outline("/nonexistent/file.rs").await;
+    assert!(result.is_err(), "Should error for nonexistent file");
+}

@@ -84,7 +84,7 @@ async fn test_mcp_server_list_tools() {
         .expect("Failed to list tools");
 
     // Verify response
-    assert_eq!(result.tools.len(), 9);
+    assert_eq!(result.tools.len(), 15);
     let tool_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
     assert!(tool_names.contains(&"get_type_hint"));
     assert!(tool_names.contains(&"get_definition"));
@@ -95,6 +95,12 @@ async fn test_mcp_server_list_tools() {
     assert!(tool_names.contains(&"find_references"));
     assert!(tool_names.contains(&"get_assists"));
     assert!(tool_names.contains(&"apply_assist"));
+    assert!(tool_names.contains(&"get_diagnostics"));
+    assert!(tool_names.contains(&"analyze_symbol"));
+    assert!(tool_names.contains(&"get_file_outline"));
+    assert!(tool_names.contains(&"search_symbols"));
+    assert!(tool_names.contains(&"expand_macro"));
+    assert!(tool_names.contains(&"get_signature_help"));
 
     // Clean up
     let _ = spawned.process.kill().await;

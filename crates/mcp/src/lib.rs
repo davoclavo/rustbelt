@@ -89,6 +89,27 @@ pub struct ApplyAssistParams {
     pub assist_id: String,
 }
 
+/// Parameters for file-based tools (no cursor position needed)
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FileParams {
+    /// Absolute path to the Rust source file
+    pub file_path: String,
+}
+
+/// Parameters for symbol search
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchSymbolsParams {
+    /// The search query (fuzzy matched against symbol names)
+    pub query: String,
+    /// Maximum number of results to return (default: 50)
+    #[serde(default = "default_search_limit")]
+    pub limit: usize,
+}
+
+fn default_search_limit() -> usize {
+    50
+}
+
 /// Parameters for cursor-based tools
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct CursorParams {
@@ -559,6 +580,282 @@ impl Rustbelt {
             ))),
             Err(e) => Ok(CallToolResult::new()
                 .with_text_content(format!("Error applying assist: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Check if code compiles and get diagnostics with suggested fixes
+    ///
+    /// Returns errors, warnings, and suggested quick-fixes for a file. Call this
+    /// AFTER making edits to verify correctness. Each diagnostic includes inline
+    /// fix suggestions so you can fix issues without additional tool calls.
+    ///
+    /// ## When to use
+    ///
+    /// - After editing Rust code to check for compile errors.
+    /// - To discover warnings and quick-fix suggestions.
+    /// - As part of an edit-check-fix loop.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - For full `cargo build` diagnostics across the entire project — use `cargo check` via shell.
+    /// - This only analyzes a single file at a time.
+    #[tool]
+    async fn get_diagnostics(&self, _ctx: &ServerCtx, params: FileParams) -> ToolResult {
+        self.ensure_analyzer(&params.file_path).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .get_diagnostics(&params.file_path)
+            .await
+        {
+            Ok(diagnostics) => {
+                if diagnostics.is_empty() {
+                    Ok(CallToolResult::new()
+                        .with_text_content("No diagnostics — code looks clean."))
+                } else {
+                    let text = diagnostics
+                        .iter()
+                        .map(|d| d.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    Ok(CallToolResult::new().with_text_content(text))
+                }
+            }
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting diagnostics: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Understand a symbol completely — type, definition, implementations, callers, reference count
+    ///
+    /// Returns everything about a symbol in one call: its type, where it's defined,
+    /// what implements it (or what traits it implements), who calls it, and how many
+    /// references exist. Use this INSTEAD of calling get_type_hint + get_definition +
+    /// find_references separately.
+    ///
+    /// ## When to use
+    ///
+    /// - Understanding an unfamiliar symbol before modifying it.
+    /// - Assessing blast radius before a refactor.
+    /// - Getting the full picture of a type/trait/function in one call.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You only need the type — use `get_type_hint` (lighter weight).
+    /// - You need the full list of references — use `find_references`.
+    #[tool]
+    async fn analyze_symbol(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
+        let cursor = CursorCoordinates {
+            file_path: params.file_path,
+            line: params.line,
+            column: params.column,
+            symbol: params.symbol,
+        };
+        self.ensure_analyzer(&cursor.file_path).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .analyze_symbol(&cursor)
+            .await
+        {
+            Ok(analysis) => Ok(CallToolResult::new().with_text_content(analysis.to_string())),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error analyzing symbol: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Get the structure of a file without reading it
+    ///
+    /// Returns all types, functions, impls, traits, and other items with their
+    /// signatures and line numbers. Use BEFORE reading a file to decide which
+    /// sections to focus on. Much cheaper than reading the whole file.
+    ///
+    /// ## When to use
+    ///
+    /// - Understanding a large file's structure before diving into specifics.
+    /// - Finding which line range contains the function/type you need.
+    /// - Getting a quick overview of a module's public API.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You need the full source code — use the Read tool.
+    /// - You need the public API of an external crate — use `ruskel`.
+    #[tool]
+    async fn get_file_outline(&self, _ctx: &ServerCtx, params: FileParams) -> ToolResult {
+        self.ensure_analyzer(&params.file_path).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .get_file_outline(&params.file_path)
+            .await
+        {
+            Ok(items) => {
+                if items.is_empty() {
+                    Ok(
+                        CallToolResult::new()
+                            .with_text_content("No structure items found in file."),
+                    )
+                } else {
+                    let text = items
+                        .iter()
+                        .map(|item| item.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(CallToolResult::new().with_text_content(text))
+                }
+            }
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting file outline: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Find types, functions, or traits by name across the workspace
+    ///
+    /// Semantic fuzzy search — better than grep for finding Rust symbols. Returns
+    /// symbol name, kind, file location, and container. Understands modules,
+    /// re-exports, and symbol kinds.
+    ///
+    /// ## When to use
+    ///
+    /// - Finding a type/function/trait by name when you don't know which file it's in.
+    /// - Exploring what symbols match a pattern (e.g., "Handler" finds AuthHandler, RequestHandler).
+    /// - Navigating to a symbol by name instead of by file path.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Searching for string literals or comments — use grep.
+    /// - You know the exact file — use `get_file_outline` or read the file.
+    #[tool]
+    async fn search_symbols(&self, _ctx: &ServerCtx, params: SearchSymbolsParams) -> ToolResult {
+        // We need a file path to initialize the analyzer - use current dir
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        self.ensure_analyzer(&cwd).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .search_symbols(&params.query, params.limit)
+            .await
+        {
+            Ok(results) => {
+                if results.is_empty() {
+                    Ok(CallToolResult::new()
+                        .with_text_content(format!("No symbols found matching '{}'", params.query)))
+                } else {
+                    let text = results
+                        .iter()
+                        .map(|r| r.to_string())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(CallToolResult::new().with_text_content(text))
+                }
+            }
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error searching symbols: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// See what a macro expands to
+    ///
+    /// Shows the full expanded source code of a macro invocation. Use when you need
+    /// to understand derive macros, proc macros, or macro_rules! invocations. Returns
+    /// the macro name and its full expansion.
+    ///
+    /// ## When to use
+    ///
+    /// - Understanding what `#[derive(Debug)]` or custom derives generate.
+    /// - Debugging macro_rules! expansions.
+    /// - Inspecting proc macro output to understand generated code.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - The macro is simple and well-known (e.g., `println!`, `vec!`).
+    /// - You need to modify the macro itself — read the macro definition instead.
+    #[tool]
+    async fn expand_macro(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
+        let cursor = CursorCoordinates {
+            file_path: params.file_path,
+            line: params.line,
+            column: params.column,
+            symbol: params.symbol,
+        };
+        self.ensure_analyzer(&cursor.file_path).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .expand_macro(&cursor)
+            .await
+        {
+            Ok(Some(expansion)) => {
+                Ok(CallToolResult::new().with_text_content(expansion.to_string()))
+            }
+            Ok(None) => Ok(CallToolResult::new()
+                .with_text_content("No macro found at this position to expand.")),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error expanding macro: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Get function parameter info at a call site
+    ///
+    /// Returns the function signature, parameter names and types, and which parameter
+    /// the cursor is currently on. Use when writing function calls to verify argument
+    /// order and types.
+    ///
+    /// ## When to use
+    ///
+    /// - Writing a function call and need to verify parameter order/types.
+    /// - Checking what arguments a method expects at a specific call site.
+    ///
+    /// ## When NOT to use
+    ///
+    /// - You need the full function definition — use `get_definition` or `analyze_symbol`.
+    /// - You need the full API of a type — use `ruskel`.
+    #[tool]
+    async fn get_signature_help(&self, _ctx: &ServerCtx, params: CursorParams) -> ToolResult {
+        let cursor = CursorCoordinates {
+            file_path: params.file_path,
+            line: params.line,
+            column: params.column,
+            symbol: params.symbol,
+        };
+        self.ensure_analyzer(&cursor.file_path).await?;
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .get_signature_help(&cursor)
+            .await
+        {
+            Ok(Some(sig_info)) => Ok(CallToolResult::new().with_text_content(sig_info.to_string())),
+            Ok(None) => Ok(CallToolResult::new()
+                .with_text_content("No signature help available at this position.")),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("Error getting signature help: {e}"))
                 .mark_as_error()),
         }
     }
