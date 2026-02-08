@@ -3860,6 +3860,7 @@ dependencies = [
  "ra_ap_ide",
  "ra_ap_ide_assists",
  "ra_ap_ide_db",
+ "ra_ap_ide_ssr",
  "ra_ap_intern",
  "ra_ap_load-cargo",
  "ra_ap_profile",

@@ -27,7 +27,8 @@ use tracing::{debug, trace, warn};
 use super::entities::{
     AssistInfo, AssistSourceChange, CallerInfo, CompletionItem, CursorCoordinates, DefinitionInfo,
     DiagnosticFix, DiagnosticInfo, FileChange, FileOutlineItem, MacroExpansion, ReferenceInfo,
-    RenameResult, SignatureInfo, SymbolAnalysis, SymbolSearchResult, TextEdit, TypeHint,
+    RenameResult, SignatureInfo, SsrMatch, SsrResult, SymbolAnalysis, SymbolSearchResult, TextEdit,
+    TypeHint,
 };
 use super::file_watcher::FileWatcher;
 use super::utils::RustAnalyzerUtils;
@@ -1337,11 +1338,9 @@ impl RustAnalyzerish {
                     let (line, col) = analysis
                         .file_line_index(item.target.file_id)
                         .ok()
-                        .and_then(|li| {
-                            Some({
-                                let lc = li.line_col(item.target.focus_or_full_range().start());
-                                (lc.line + 1, lc.col + 1)
-                            })
+                        .map(|li| {
+                            let lc = li.line_col(item.target.focus_or_full_range().start());
+                            (lc.line + 1, lc.col + 1)
                         })
                         .unwrap_or((0, 0));
                     CallerInfo {
@@ -1366,11 +1365,9 @@ impl RustAnalyzerish {
                     let (line, col) = analysis
                         .file_line_index(item.target.file_id)
                         .ok()
-                        .and_then(|li| {
-                            Some({
-                                let lc = li.line_col(item.target.focus_or_full_range().start());
-                                (lc.line + 1, lc.col + 1)
-                            })
+                        .map(|li| {
+                            let lc = li.line_col(item.target.focus_or_full_range().start());
+                            (lc.line + 1, lc.col + 1)
                         })
                         .unwrap_or((0, 0));
                     CallerInfo {
@@ -1588,5 +1585,337 @@ impl RustAnalyzerish {
             Ok(None) => Ok(None),
             Err(e) => Err(anyhow::anyhow!("Signature help failed: {:?}", e)),
         }
+    }
+
+    /// Perform structural search and replace (SSR) - synchronous core
+    ///
+    /// Returns the result with file changes that need to be applied separately.
+    fn ssr_sync(
+        &mut self,
+        pattern: &str,
+        context_file: Option<&str>,
+    ) -> Result<(Vec<SsrMatch>, Vec<FileChange>)> {
+        use ra_ap_ide_ssr::SsrRule;
+        use std::str::FromStr;
+
+        let db = self.host.raw_database();
+
+        // Parse the SSR rule
+        let rule = SsrRule::from_str(pattern)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SSR pattern: {}", e))?;
+
+        // Create a MatchFinder - use context file if provided, otherwise use first file
+        let mut finder = if let Some(ctx_file) = context_file {
+            let path = PathBuf::from(ctx_file);
+            let file_id = self.file_watcher.get_file_id(&path)?;
+            ra_ap_ide_ssr::MatchFinder::in_context(
+                db,
+                ra_ap_ide_db::FilePosition {
+                    file_id,
+                    offset: TextSize::from(0),
+                },
+                vec![],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+        } else {
+            ra_ap_ide_ssr::MatchFinder::at_first_file(db)
+                .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+        };
+
+        // Add the rule
+        finder
+            .add_rule(rule)
+            .map_err(|e| anyhow::anyhow!("Failed to add SSR rule: {}", e))?;
+
+        // Get matches - we can only use matched_text() since range is private
+        let ssr_matches = finder.matches();
+
+        // Collect matched texts (this is all we can access from Match)
+        let matched_texts: Vec<String> = ssr_matches
+            .matches
+            .iter()
+            .map(|m| m.matched_text())
+            .collect();
+
+        // Get edits - this gives us file locations
+        let edits = finder.edits();
+
+        if edits.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        // Build file changes and matches from edits
+        let mut file_changes = Vec::new();
+        let mut matches = Vec::new();
+        let mut match_idx = 0;
+
+        for (file_id, text_edit) in &edits {
+            if let Some(file_path) = self.file_watcher.file_path(*file_id)
+                && let Ok(line_index) = self.host.analysis().file_line_index(*file_id)
+            {
+                // Get original file text to extract what's being replaced
+                let file_text = self
+                    .host
+                    .analysis()
+                    .file_text(*file_id)
+                    .ok()
+                    .map(|t| t.to_string());
+
+                let mut edit_items = Vec::new();
+                for edit in text_edit.iter() {
+                    let start_line_col = line_index.line_col(edit.delete.start());
+                    let end_line_col = line_index.line_col(edit.delete.end());
+
+                    // Extract the original text being replaced
+                    let original_text = file_text.as_ref().and_then(|ft| {
+                        let start: usize = edit.delete.start().into();
+                        let end: usize = edit.delete.end().into();
+                        ft.get(start..end).map(|s| s.to_string())
+                    });
+
+                    // Create a match entry for this edit
+                    matches.push(SsrMatch {
+                        file_path: file_path.clone(),
+                        line: start_line_col.line + 1,
+                        column: start_line_col.col + 1,
+                        end_line: end_line_col.line + 1,
+                        end_column: end_line_col.col + 1,
+                        matched_text: original_text.unwrap_or_else(|| {
+                            matched_texts
+                                .get(match_idx)
+                                .cloned()
+                                .unwrap_or_else(|| "<unknown>".to_string())
+                        }),
+                        replacement: Some(edit.insert.clone()),
+                    });
+                    match_idx += 1;
+
+                    edit_items.push(TextEdit {
+                        line: start_line_col.line + 1,
+                        column: start_line_col.col + 1,
+                        end_line: end_line_col.line + 1,
+                        end_column: end_line_col.col + 1,
+                        new_text: edit.insert.clone(),
+                    });
+                }
+
+                file_changes.push(FileChange {
+                    file_path,
+                    edits: edit_items,
+                });
+            }
+        }
+
+        Ok((matches, file_changes))
+    }
+
+    /// Search for SSR pattern matches - synchronous core
+    fn ssr_search_sync(
+        &mut self,
+        pattern: &str,
+        context_file: Option<&str>,
+    ) -> Result<Vec<SsrMatch>> {
+        use ra_ap_ide_ssr::SsrPattern;
+        use std::str::FromStr;
+
+        let db = self.host.raw_database();
+
+        // Parse the search pattern (not a full rule with replacement)
+        let search_pattern = SsrPattern::from_str(pattern)
+            .map_err(|e| anyhow::anyhow!("Failed to parse SSR pattern: {}", e))?;
+
+        // Create a MatchFinder
+        let mut finder = if let Some(ctx_file) = context_file {
+            let path = PathBuf::from(ctx_file);
+            let file_id = self.file_watcher.get_file_id(&path)?;
+            ra_ap_ide_ssr::MatchFinder::in_context(
+                db,
+                ra_ap_ide_db::FilePosition {
+                    file_id,
+                    offset: TextSize::from(0),
+                },
+                vec![],
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+        } else {
+            ra_ap_ide_ssr::MatchFinder::at_first_file(db)
+                .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+        };
+
+        // Add search pattern
+        finder
+            .add_search_pattern(search_pattern)
+            .map_err(|e| anyhow::anyhow!("Failed to add SSR pattern: {}", e))?;
+
+        // Get matches - we can only use matched_text() since range is private
+        let ssr_matches = finder.matches();
+
+        // Collect matched_text for each match
+        let matched_texts: Vec<String> = ssr_matches
+            .matches
+            .iter()
+            .map(|m| m.matched_text())
+            .collect();
+
+        if matched_texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Re-create finder with a replacement pattern to get location info via edits()
+        let dummy_pattern = format!("{} ==>> $__placeholder__", pattern);
+
+        // Try to parse as a rule - if it fails, return matches without location info
+        let rule_result = ra_ap_ide_ssr::SsrRule::from_str(&dummy_pattern);
+
+        if let Ok(rule) = rule_result {
+            let mut finder2 = if let Some(ctx_file) = context_file {
+                let path = PathBuf::from(ctx_file);
+                let file_id = self.file_watcher.get_file_id(&path)?;
+                ra_ap_ide_ssr::MatchFinder::in_context(
+                    db,
+                    ra_ap_ide_db::FilePosition {
+                        file_id,
+                        offset: TextSize::from(0),
+                    },
+                    vec![],
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+            } else {
+                ra_ap_ide_ssr::MatchFinder::at_first_file(db)
+                    .map_err(|e| anyhow::anyhow!("Failed to create SSR context: {}", e))?
+            };
+
+            if finder2.add_rule(rule).is_ok() {
+                let edits = finder2.edits();
+
+                let mut matches = Vec::new();
+                let mut match_idx = 0;
+
+                for (file_id, text_edit) in &edits {
+                    if let Some(file_path) = self.file_watcher.file_path(*file_id)
+                        && let Ok(line_index) = self.host.analysis().file_line_index(*file_id)
+                    {
+                        let file_text = self
+                            .host
+                            .analysis()
+                            .file_text(*file_id)
+                            .ok()
+                            .map(|t| t.to_string());
+
+                        for edit in text_edit.iter() {
+                            let start_line_col = line_index.line_col(edit.delete.start());
+                            let end_line_col = line_index.line_col(edit.delete.end());
+
+                            let original_text = file_text.as_ref().and_then(|ft| {
+                                let start: usize = edit.delete.start().into();
+                                let end: usize = edit.delete.end().into();
+                                ft.get(start..end).map(|s| s.to_string())
+                            });
+
+                            matches.push(SsrMatch {
+                                file_path: file_path.clone(),
+                                line: start_line_col.line + 1,
+                                column: start_line_col.col + 1,
+                                end_line: end_line_col.line + 1,
+                                end_column: end_line_col.col + 1,
+                                matched_text: original_text.unwrap_or_else(|| {
+                                    matched_texts
+                                        .get(match_idx)
+                                        .cloned()
+                                        .unwrap_or_else(|| "<unknown>".to_string())
+                                }),
+                                replacement: None,
+                            });
+                            match_idx += 1;
+                        }
+                    }
+                }
+
+                return Ok(matches);
+            }
+        }
+
+        // Fallback: return matches without location info
+        Ok(matched_texts
+            .into_iter()
+            .map(|text| SsrMatch {
+                file_path: String::new(),
+                line: 0,
+                column: 0,
+                end_line: 0,
+                end_column: 0,
+                matched_text: text,
+                replacement: None,
+            })
+            .collect())
+    }
+
+    /// Perform structural search and replace (SSR)
+    ///
+    /// The pattern syntax is: `search_pattern ==>> replacement_pattern`
+    /// Use `$name` for placeholders that match any AST node.
+    ///
+    /// Examples:
+    /// - `foo($a) ==>> bar($a)` - Replace foo calls with bar calls
+    /// - `$receiver.unwrap() ==>> $receiver?` - Replace unwrap with ?
+    /// - `rgba($val) ==>> colors::CONSTANT` - Replace function calls with constants
+    ///
+    /// If `dry_run` is true, returns matches without applying changes.
+    pub async fn ssr(
+        &mut self,
+        pattern: &str,
+        context_file: Option<&str>,
+        dry_run: bool,
+    ) -> Result<SsrResult> {
+        // Ensure file watcher is up to date
+        self.file_watcher.drain_and_apply_changes(&mut self.host)?;
+
+        // Run the synchronous SSR core
+        let (matches, file_changes) = self.ssr_sync(pattern, context_file)?;
+
+        if matches.is_empty() || dry_run {
+            return Ok(SsrResult {
+                matches,
+                file_changes: if dry_run { None } else { Some(file_changes) },
+                dry_run,
+            });
+        }
+
+        // Apply the changes to disk (async part)
+        for file_change in &file_changes {
+            RustAnalyzerUtils::apply_file_change(file_change).await?;
+        }
+
+        debug!(
+            "SSR applied: {} matches replaced in {} files",
+            matches.len(),
+            file_changes.len()
+        );
+
+        Ok(SsrResult {
+            matches,
+            file_changes: Some(file_changes),
+            dry_run,
+        })
+    }
+
+    /// Search for SSR pattern matches without replacement
+    ///
+    /// Use this to find all occurrences of a pattern without modifying code.
+    /// The pattern syntax uses `$name` for placeholders.
+    ///
+    /// Examples:
+    /// - `rgba($val)` - Find all rgba() calls
+    /// - `$receiver.unwrap()` - Find all .unwrap() calls
+    pub async fn ssr_search(
+        &mut self,
+        pattern: &str,
+        context_file: Option<&str>,
+    ) -> Result<Vec<SsrMatch>> {
+        // Ensure file watcher is up to date
+        self.file_watcher.drain_and_apply_changes(&mut self.host)?;
+
+        // Run the synchronous search
+        self.ssr_search_sync(pattern, context_file)
     }
 }

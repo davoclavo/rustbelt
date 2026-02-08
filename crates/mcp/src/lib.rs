@@ -125,6 +125,39 @@ pub struct CursorParams {
     pub symbol: Option<String>,
 }
 
+/// Parameters for structural search and replace
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SsrParams {
+    /// The SSR pattern. Format: `search_pattern ==>> replacement_pattern`
+    /// Use `$name` for placeholders that match any AST node.
+    ///
+    /// Examples:
+    /// - `foo($a) ==>> bar($a)` - Replace foo calls with bar calls
+    /// - `$receiver.unwrap() ==>> $receiver?` - Replace unwrap with ?
+    /// - `rgba(0x3B82F633) ==>> colors::BLUE_BG` - Replace specific values
+    pub pattern: String,
+    /// Optional file path for name resolution context.
+    /// If not provided, uses the first file in the workspace.
+    pub context_file: Option<String>,
+    /// If true, only show matches without applying changes (default: false)
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Parameters for SSR search (find matches without replacement)
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SsrSearchParams {
+    /// The search pattern. Use `$name` for placeholders.
+    ///
+    /// Examples:
+    /// - `rgba($val)` - Find all rgba() calls
+    /// - `$receiver.unwrap()` - Find all .unwrap() calls
+    /// - `println!($args)` - Find all println! calls
+    pub pattern: String,
+    /// Optional file path for name resolution context.
+    pub context_file: Option<String>,
+}
+
 /// Rust-Analyzer MCP server connection
 #[derive(Debug, Clone)]
 pub struct Rustbelt {
@@ -856,6 +889,157 @@ impl Rustbelt {
                 .with_text_content("No signature help available at this position.")),
             Err(e) => Ok(CallToolResult::new()
                 .with_text_content(format!("Error getting signature help: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Structural Search and Replace (SSR) — semantic find-and-replace for Rust code
+    ///
+    /// Searches for code patterns using AST matching and optionally replaces them.
+    /// Much more powerful than text-based find/replace because it understands Rust syntax.
+    ///
+    /// ## Pattern Syntax
+    ///
+    /// - Use `$name` for placeholders that match any expression/type/pattern
+    /// - Format: `search_pattern ==>> replacement_pattern`
+    /// - Placeholders in the replacement refer to what was matched
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// # Replace function calls
+    /// foo($a, $b) ==>> bar($b, $a)
+    ///
+    /// # Replace method chains
+    /// $receiver.unwrap() ==>> $receiver?
+    ///
+    /// # Replace specific values with constants
+    /// rgba(0x3B82F633) ==>> colors::BLUE_BG
+    ///
+    /// # Replace patterns
+    /// if let Some($x) = $opt { $x } else { $default } ==>> $opt.unwrap_or($default)
+    /// ```
+    ///
+    /// ## When to use
+    ///
+    /// - Bulk refactoring: renaming function calls, updating API usage patterns
+    /// - Extracting repeated values into constants
+    /// - Modernizing code patterns (e.g., `try!` to `?`, `unwrap` to `?`)
+    /// - Any refactoring that involves replacing one code pattern with another
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Simple text find/replace — use your editor
+    /// - Renaming a single symbol — use `rename_symbol`
+    /// - The pattern is purely textual with no structure
+    #[tool]
+    async fn ssr(&self, _ctx: &ServerCtx, params: SsrParams) -> ToolResult {
+        // Get context file for analyzer initialization
+        let init_path = params.context_file.as_deref().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+                .leak()
+        });
+        self.ensure_analyzer(init_path).await?;
+
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .ssr(
+                &params.pattern,
+                params.context_file.as_deref(),
+                params.dry_run,
+            )
+            .await
+        {
+            Ok(result) => Ok(CallToolResult::new().with_text_content(result.to_string())),
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("SSR error: {e}"))
+                .mark_as_error()),
+        }
+    }
+
+    /// Search for code patterns using SSR syntax (without replacement)
+    ///
+    /// Finds all occurrences of a structural pattern in the codebase.
+    /// Use this to understand the scope of a refactoring before applying it.
+    ///
+    /// ## Pattern Syntax
+    ///
+    /// - Use `$name` for placeholders that match any expression/type/pattern
+    /// - No `==>>` needed — this is search-only
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// # Find all rgba() calls
+    /// rgba($val)
+    ///
+    /// # Find all .unwrap() calls
+    /// $receiver.unwrap()
+    ///
+    /// # Find all println! macro calls
+    /// println!($args)
+    ///
+    /// # Find specific function calls
+    /// std::fs::read_to_string($path)
+    /// ```
+    ///
+    /// ## When to use
+    ///
+    /// - Before a bulk refactoring, to see what will be affected
+    /// - Finding all usages of a particular code pattern
+    /// - Auditing code for specific patterns (e.g., finding all `.unwrap()` calls)
+    ///
+    /// ## When NOT to use
+    ///
+    /// - Finding a single symbol's usages — use `find_references` instead
+    /// - Searching for text strings or comments — use grep
+    /// - You already know you want to replace — use `ssr` directly with `dry_run: true`
+    #[tool]
+    async fn ssr_search(&self, _ctx: &ServerCtx, params: SsrSearchParams) -> ToolResult {
+        let init_path = params.context_file.as_deref().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+                .leak()
+        });
+        self.ensure_analyzer(init_path).await?;
+
+        match self
+            .analyzer
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .ssr_search(&params.pattern, params.context_file.as_deref())
+            .await
+        {
+            Ok(matches) => {
+                if matches.is_empty() {
+                    Ok(CallToolResult::new().with_text_content(format!(
+                        "No matches found for pattern: {}",
+                        params.pattern
+                    )))
+                } else {
+                    let text = format!(
+                        "## Found {} matches\n\n{}",
+                        matches.len(),
+                        matches
+                            .iter()
+                            .map(|m| m.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    Ok(CallToolResult::new().with_text_content(text))
+                }
+            }
+            Err(e) => Ok(CallToolResult::new()
+                .with_text_content(format!("SSR search error: {e}"))
                 .mark_as_error()),
         }
     }

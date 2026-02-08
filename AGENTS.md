@@ -46,6 +46,8 @@ rustbelt exposes rust-analyzer IDE functionality via the Model Context Protocol 
 
 **File watching**: Changes are applied via `file_watcher.drain_and_apply_changes()` before each operation
 
+**SSR (Structural Search and Replace)**: Tools `ssr` and `ssr_search` provide semantic code transformation using rust-analyzer's SSR engine. Pattern syntax: `search_pattern ==>> replacement_pattern` with `$name` placeholders. Example: `$receiver.unwrap() ==>> $receiver?`
+
 ## Dependencies
 
 - Rust nightly (`nightly-2026-01-01` via rust-toolchain.toml), Edition 2024

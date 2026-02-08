@@ -1192,3 +1192,203 @@ async fn test_get_file_outline_nonexistent_file() {
     let result = analyzer.get_file_outline("/nonexistent/file.rs").await;
     assert!(result.is_err(), "Should error for nonexistent file");
 }
+
+// ==================== SSR (Structural Search and Replace) Tests ====================
+
+#[tokio::test]
+async fn test_ssr_search_method_call() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Search for .to_string() calls
+    let matches = analyzer
+        .ssr_search("$receiver.to_string()", Some(sample_path.to_str().unwrap()))
+        .await
+        .expect("Error performing SSR search");
+
+    println!("Found {} matches for .to_string():", matches.len());
+    for m in &matches {
+        println!("  - {}", m);
+    }
+
+    // The sample file has multiple .to_string() calls
+    assert!(
+        !matches.is_empty(),
+        "Should find at least one .to_string() call"
+    );
+
+    // All matches should have matched text
+    for m in &matches {
+        assert!(
+            !m.matched_text.is_empty(),
+            "Matched text should not be empty"
+        );
+        assert!(
+            m.matched_text.contains("to_string"),
+            "Matched text should contain 'to_string'"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_ssr_search_collect_call() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Search for .collect() calls
+    let matches = analyzer
+        .ssr_search("$receiver.collect()", Some(sample_path.to_str().unwrap()))
+        .await
+        .expect("Error performing SSR search");
+
+    println!("Found {} matches for .collect():", matches.len());
+    for m in &matches {
+        println!("  - {}", m);
+    }
+
+    // The sample file has .collect() calls in iterator chains
+    assert!(
+        !matches.is_empty(),
+        "Should find at least one .collect() call"
+    );
+
+    for m in &matches {
+        assert!(
+            m.matched_text.contains("collect"),
+            "Matched text should contain 'collect': {}",
+            m.matched_text
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_ssr_search_pattern_with_placeholder() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Search for Option field access - email field is Option<String>
+    let matches = analyzer
+        .ssr_search("$receiver.clone()", Some(sample_path.to_str().unwrap()))
+        .await
+        .expect("Error performing SSR search");
+
+    println!("Found {} matches for .clone():", matches.len());
+    for m in &matches {
+        println!("  - {}", m);
+    }
+
+    // The sample file has .clone() usage
+    assert!(
+        !matches.is_empty(),
+        "Should find at least one .clone() usage"
+    );
+
+    // Matches should contain "clone"
+    for m in &matches {
+        assert!(
+            m.matched_text.contains("clone"),
+            "Matched text should contain 'clone': {}",
+            m.matched_text
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_ssr_dry_run() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Test SSR with dry_run=true (preview replacement without applying)
+    // Replace .clone() with .to_owned()
+    let result = analyzer
+        .ssr(
+            "$receiver.clone() ==>> $receiver.to_owned()",
+            Some(sample_path.to_str().unwrap()),
+            true, // dry_run
+        )
+        .await
+        .expect("Error performing SSR dry run");
+
+    println!("SSR dry run result:\n{}", result);
+
+    // The sample file has .clone() calls (e.g., person.name.clone())
+    assert!(
+        !result.matches.is_empty(),
+        "Should find at least one .clone() call"
+    );
+
+    // Since it's a dry run, file_changes should be None
+    assert!(
+        result.file_changes.is_none(),
+        "Dry run should not have file_changes"
+    );
+    assert!(result.dry_run, "Result should indicate it was a dry run");
+
+    // Matches should show the replacement preview
+    for m in &result.matches {
+        assert!(
+            m.matched_text.contains("clone"),
+            "Matched text should contain 'clone'"
+        );
+        if let Some(ref replacement) = m.replacement {
+            assert!(
+                replacement.contains("to_owned"),
+                "Replacement should contain 'to_owned'"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ssr_search_no_matches() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Search for a pattern that doesn't exist in the sample file
+    let matches = analyzer
+        .ssr_search(
+            "$receiver.nonexistent_method()",
+            Some(sample_path.to_str().unwrap()),
+        )
+        .await
+        .expect("Error performing SSR search");
+
+    println!("Found {} matches for nonexistent method:", matches.len());
+
+    assert!(
+        matches.is_empty(),
+        "Should find no matches for nonexistent method"
+    );
+}
+
+#[tokio::test]
+async fn test_ssr_complex_pattern() {
+    let analyzer = get_shared_analyzer().await;
+    let mut analyzer = analyzer.lock().await;
+    let sample_path = get_sample_file_path();
+
+    // Search for iterator chain pattern: .iter().map(...)
+    let matches = analyzer
+        .ssr_search(
+            "$receiver.iter().map($f)",
+            Some(sample_path.to_str().unwrap()),
+        )
+        .await
+        .expect("Error performing SSR search");
+
+    println!("Found {} matches for .iter().map():", matches.len());
+    for m in &matches {
+        println!("  - {}", m);
+    }
+
+    // The sample file has .iter().map() chains
+    assert!(
+        !matches.is_empty(),
+        "Should find at least one .iter().map() chain"
+    );
+}

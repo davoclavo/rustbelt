@@ -23,6 +23,7 @@ ra_ap_vfs = { workspace = true }
 ra_ap_vfs-notify = { workspace = true }
 ra_ap_load-cargo = { workspace = true }
 ra_ap_profile = { workspace = true }
+ra_ap_ide_ssr = { workspace = true }
 
 # rust-analyzer transitive dependencies
 triomphe = { workspace = true }

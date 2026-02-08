@@ -594,3 +594,95 @@ impl fmt::Display for SignatureInfo {
         Ok(())
     }
 }
+
+// --- SSR (Structural Search and Replace) entities ---
+
+/// A single SSR match found in the codebase
+#[derive(Debug, Clone)]
+pub struct SsrMatch {
+    /// Path to the file containing the match
+    pub file_path: String,
+    /// Line number (1-based) where the match starts
+    pub line: u32,
+    /// Column number (1-based) where the match starts
+    pub column: u32,
+    /// Line number (1-based) where the match ends
+    pub end_line: u32,
+    /// Column number (1-based) where the match ends
+    pub end_column: u32,
+    /// The matched source code
+    pub matched_text: String,
+    /// The replacement text (if a replacement pattern was provided)
+    pub replacement: Option<String>,
+}
+
+impl fmt::Display for SsrMatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}-{}:{}: `{}`",
+            self.file_path,
+            self.line,
+            self.column,
+            self.end_line,
+            self.end_column,
+            self.matched_text.replace('\n', "\\n")
+        )?;
+        if let Some(ref repl) = self.replacement {
+            write!(f, " → `{}`", repl.replace('\n', "\\n"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Result of an SSR operation
+#[derive(Debug, Clone)]
+pub struct SsrResult {
+    /// All matches found
+    pub matches: Vec<SsrMatch>,
+    /// File changes if replacement was applied (only if dry_run=false)
+    pub file_changes: Option<Vec<FileChange>>,
+    /// Whether this was a dry run (preview only)
+    pub dry_run: bool,
+}
+
+impl fmt::Display for SsrResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mode = if self.dry_run { "Preview" } else { "Applied" };
+        writeln!(f, "## SSR {} - {} matches found", mode, self.matches.len())?;
+
+        if self.matches.is_empty() {
+            return Ok(());
+        }
+
+        // Group matches by file
+        let mut by_file: std::collections::HashMap<&str, Vec<&SsrMatch>> =
+            std::collections::HashMap::new();
+        for m in &self.matches {
+            by_file.entry(&m.file_path).or_default().push(m);
+        }
+
+        for (file, matches) in by_file {
+            writeln!(f, "\n### {} ({} matches)", file, matches.len())?;
+            for m in matches {
+                writeln!(
+                    f,
+                    "  L{}:{} `{}` → `{}`",
+                    m.line,
+                    m.column,
+                    m.matched_text.replace('\n', "\\n"),
+                    m.replacement.as_deref().unwrap_or("(no replacement)")
+                )?;
+            }
+        }
+
+        if let Some(ref changes) = self.file_changes {
+            writeln!(f, "\n## Files modified: {}", changes.len())?;
+            for fc in changes {
+                writeln!(f, "  - {}", fc.file_path)?;
+            }
+        }
+
+        Ok(())
+    }
+}
