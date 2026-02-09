@@ -16,7 +16,7 @@ tmcp = "0.3"
 schemars = { workspace = true }
 
 # Rust code skeleton generation
-libruskel = { git = "https://github.com/cortesi/ruskel.git", rev = "57ad247"}
+libruskel = { git = "https://github.com/davoclavo/ruskel.git", branch = "feat/support_target_architecture_v2" }
 
 # Async runtime
 tokio = { workspace = true }
