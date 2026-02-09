@@ -25,6 +25,7 @@ pub struct RustAnalyzerishBuilder {
     project_root: Option<PathBuf>,
     cargo_config: CargoConfig,
     load_config: LoadCargoConfig,
+    enable_file_watching: bool,
 }
 
 impl Default for RustAnalyzerishBuilder {
@@ -35,6 +36,9 @@ impl Default for RustAnalyzerishBuilder {
 
 impl RustAnalyzerishBuilder {
     /// Create a new builder with default configuration
+    ///
+    /// By default, file watching is disabled for fast CLI usage.
+    /// Use `with_file_watching(true)` to enable it for long-running processes.
     pub fn new() -> Self {
         Self {
             project_root: None,
@@ -50,7 +54,18 @@ impl RustAnalyzerishBuilder {
                 with_proc_macro_server: ProcMacroServerChoice::Sysroot,
                 prefill_caches: false, // We handle this manually to add more cores
             },
+            enable_file_watching: false,
         }
+    }
+
+    /// Enable or disable file watching
+    ///
+    /// File watching is useful for long-running processes (like MCP servers)
+    /// that need to react to file changes. For one-shot CLI commands, it's
+    /// not needed and can cause shutdown delays.
+    pub fn with_file_watching(mut self, enable: bool) -> Self {
+        self.enable_file_watching = enable;
+        self
     }
 
     /// Set the workspace root directory
@@ -136,9 +151,14 @@ impl RustAnalyzerishBuilder {
             elapsed.memory.allocated.megabytes() as u64
         );
 
-        // Set up file watching
+        // Set up file watching (optionally)
         let mut file_watcher = FileWatcher::new();
-        file_watcher.setup_file_watching(abs_project_root.clone(), vfs, &mut host)?;
+        file_watcher.setup_file_watching(
+            abs_project_root.clone(),
+            vfs,
+            &mut host,
+            self.enable_file_watching,
+        )?;
 
         // Prime caches with all available cores for better performance
         let threads = num_cpus::get_physical();

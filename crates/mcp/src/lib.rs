@@ -178,9 +178,10 @@ impl Rustbelt {
     ) -> std::result::Result<(), tmcp::ToolError> {
         let mut analyzer_guard = self.analyzer.lock().await;
         if analyzer_guard.is_none() {
-            // Create a default analyzer for the current folder
+            // Create analyzer with file watching enabled for the long-running MCP server
             let analyzer = RustAnalyzerishBuilder::from_file(file_path)
                 .expect("Failed to find root workspace from given file")
+                .with_file_watching(true)
                 .build()
                 .expect("Failed to create analyzer with current directory");
 

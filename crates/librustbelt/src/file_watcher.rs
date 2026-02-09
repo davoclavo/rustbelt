@@ -15,10 +15,14 @@ use ra_ap_vfs_notify::NotifyHandle;
 use tracing::{debug, error, trace};
 
 /// File watching configuration and state
+///
+/// NOTE: Field order matters for drop order! The `vfs_handle` must be dropped
+/// BEFORE `vfs_receiver` to avoid the VfsLoader thread panicking when trying
+/// to send to a closed channel. Rust drops fields in declaration order.
 #[derive(Debug)]
 pub struct FileWatcher {
-    vfs_receiver: Option<Receiver<Message>>,
     vfs_handle: Option<NotifyHandle>,
+    vfs_receiver: Option<Receiver<Message>>,
     vfs: Vfs,
 }
 
@@ -32,26 +36,39 @@ impl FileWatcher {
     /// Create a new file watcher
     pub fn new() -> Self {
         Self {
-            vfs_receiver: None,
             vfs_handle: None,
+            vfs_receiver: None,
             vfs: Vfs::default(),
         }
     }
 
     /// Set up file watching for the workspace
+    ///
+    /// If `enable_watching` is false, only the VFS is initialized without
+    /// starting the file watcher thread. This is useful for one-shot CLI
+    /// commands that don't need live file watching.
     pub fn setup_file_watching(
         &mut self,
         abs_project_root: AbsPathBuf,
         vfs: Vfs,
         _host: &mut AnalysisHost,
+        enable_watching: bool,
     ) -> Result<()> {
+        // Replace our VFS with the loaded workspace VFS
+        self.vfs = vfs;
+
+        if !enable_watching {
+            tracing::info!(
+                "File watching disabled, VFS initialized for: {}",
+                abs_project_root
+            );
+            return Ok(());
+        }
+
         tracing::info!(
             "Setting up file watching for workspace: {}",
             abs_project_root
         );
-
-        // Replace our VFS with the loaded workspace VFS
-        self.vfs = vfs;
 
         // Create a channel for VFS loader messages
         let (sender, receiver) = unbounded::<Message>();
@@ -70,9 +87,12 @@ impl FileWatcher {
     }
 
     /// Drain all pending messages from the file watcher and apply changes synchronously
+    ///
+    /// If file watching is disabled (no receiver), this is a no-op.
     pub fn drain_and_apply_changes(&mut self, host: &mut AnalysisHost) -> Result<()> {
         let Some(ref receiver) = self.vfs_receiver else {
-            return Err(anyhow::anyhow!("VFS receiver not initialized"));
+            // File watching disabled, nothing to drain
+            return Ok(());
         };
 
         // Process all pending messages from the file watcher
